@@ -1,0 +1,41 @@
+# Render Blueprint - Background Worker + Persistent Disk
+#
+# Bu dosya GitHub'a push'lanınca Render otomatik tanır.
+# Manuel ekleme yerine "Blueprint" sekmesinden de import edebilirsin.
+
+services:
+  - type: worker
+    name: memecoin-sniper
+    runtime: python
+    plan: starter            # $7/ay, 512MB RAM, uyumaz
+    region: frankfurt        # TR'ye en yakın
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    autoDeploy: true
+
+    envVars:
+      # Bu üçü Render dashboard'dan elle gireceksin (secret)
+      - key: TOKEN
+        sync: false
+      - key: CHAT_ID
+        sync: false
+      - key: WALLET_PRIVATE_KEY
+        sync: false
+      - key: SOLANA_RPC_URL
+        sync: false
+      - key: HELIUS_API_KEY
+        sync: false
+
+      # Diğerleri default - istediğin zaman dashboard'dan değiştirebilirsin
+      - key: DATA_DIR
+        value: /data
+      - key: BUY_AMOUNT_SOL
+        value: "0.01"
+      - key: SLIPPAGE_BPS
+        value: "300"
+
+    disk:
+      name: positions-disk
+      mountPath: /data
+      sizeGB: 1
