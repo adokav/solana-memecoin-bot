@@ -58,6 +58,11 @@ class Config:
     data_dir: Path = field(default_factory=lambda: Path(_str("DATA_DIR", "./data")))
 
     # --- İşlem ---
+
+    # --- Portföy risk limitleri ---
+    max_open_positions: int = field(default_factory=lambda: _int("MAX_OPEN_POSITIONS", 3))
+    max_total_exposure_sol: float = field(default_factory=lambda: _float("MAX_TOTAL_EXPOSURE_SOL", 0.03))
+
     buy_amount_sol: float = field(default_factory=lambda: _float("BUY_AMOUNT_SOL", 0.01))
     slippage_bps: int = field(default_factory=lambda: _int("SLIPPAGE_BPS", 300))
 
