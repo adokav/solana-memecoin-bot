@@ -48,6 +48,8 @@ class RugCheckClient:
         # token -> (timestamp, SafetyReport) basit cache
         self._cache: dict[str, tuple[float, SafetyReport]] = {}
         self._cache_ttl = 600  # 10 dakika
+        # mint -> (timestamp, full_report_dict | None)  full report cache (10dk)
+        self._full_cache: dict[str, tuple[float, dict | None]] = {}
         # mint -> [(ts, holder_count), ...]  holder sayısı zaman serisi
         self._holder_history: dict[str, list[tuple[float, int]]] = {}
         # creator_addr -> (ts, token_count)  creator sorgu cache (24h)
@@ -90,26 +92,41 @@ class RugCheckClient:
             return None
 
     async def _rugcheck_full_report(self, mint: str) -> dict | None:
+        cached = self._full_cache.get(mint)
+        if cached and time.time() - cached[0] < self._cache_ttl:
+            return cached[1]
         try:
             r = await self._http.get(f"{RUGCHECK_BASE}/tokens/{mint}/report")
             if r.status_code == 404:
+                self._full_cache[mint] = (time.time(), None)
                 return None
             r.raise_for_status()
-            return r.json()
+            data = r.json()
+            self._full_cache[mint] = (time.time(), data)
+            return data
         except httpx.HTTPError as e:
             log.debug("rugcheck full report error for %s: %s", mint, e)
+            # Hata da cache'lensin ki rate limit storm'unda her tarama tekrar denemesin
+            self._full_cache[mint] = (time.time(), None)
             return None
 
     async def _enrich_from_full(self, mint: str, summary: dict) -> dict:
-        """Summary'de eksik field'ları full report'tan tamamla. Tek HTTP çağrısı."""
-        wanted = ("creator", "deployer", "creatorTokens", "insiderNetworks", "topHolders")
-        if all(summary.get(k) is not None for k in wanted):
+        """Summary'de eksik field'ları full report'tan tamamla.
+        Full report'u SADECE summary'de gerçekten eksik bir field varsa çek.
+        """
+        # Hangi field'lar gerekli, yapılandırmaya göre belirle
+        needed: list[str] = ["insiderNetworks"]  # insider check her zaman aktif
+        if config.dev_wallet_check_enabled:
+            needed.extend(["creator", "creatorTokens"])
+
+        if all(summary.get(k) is not None for k in needed):
             return summary
+
         full = await self._rugcheck_full_report(mint)
         if not full:
             return summary
         merged = dict(summary)
-        for key in wanted:
+        for key in ("creator", "deployer", "creatorTokens", "insiderNetworks", "topHolders"):
             if merged.get(key) is None and full.get(key) is not None:
                 merged[key] = full[key]
         return merged
