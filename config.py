@@ -81,13 +81,14 @@ class Config:
     early_min_price_h1: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_H1", 15))
     early_min_price_m5: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_M5", 3))
     early_min_txns_h1: int = field(default_factory=lambda: _int("EARLY_MIN_TXNS_H1", 80))
-    early_min_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MIN_BUY_RATIO", 0.62))
-    early_max_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MAX_BUY_RATIO", 0.92))
+    early_min_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MIN_BUY_RATIO", 0.58))
+    early_max_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MAX_BUY_RATIO", 0.95))
 
     # Ortalama işlem boyutu (wash trading / micro-spam filtresi)
-    min_avg_tx_size_usd: float = field(default_factory=lambda: _float("MIN_AVG_TX_SIZE_USD", 20))
-    max_avg_tx_size_usd: float = field(default_factory=lambda: _float("MAX_AVG_TX_SIZE_USD", 300))
-    avg_tx_min_txns: int = field(default_factory=lambda: _int("AVG_TX_MIN_TXNS", 30))
+    # Memecoin'lerde küçük alımlar normal — alt sınırı dar tutma
+    min_avg_tx_size_usd: float = field(default_factory=lambda: _float("MIN_AVG_TX_SIZE_USD", 5))
+    max_avg_tx_size_usd: float = field(default_factory=lambda: _float("MAX_AVG_TX_SIZE_USD", 500))
+    avg_tx_min_txns: int = field(default_factory=lambda: _int("AVG_TX_MIN_TXNS", 50))
 
     # --- KATMAN 1: Trend takip ---
     trend_min_liq: float = field(default_factory=lambda: _float("TREND_MIN_LIQUIDITY", 50000))
@@ -100,13 +101,14 @@ class Config:
 
     # Multi-timeframe momentum confirmation
     # EARLY: h6 fiyat değişimi bu eşikten düşükse "toparlanma" şüphesi → ele
-    early_min_price_h6: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_H6", -20))
+    early_min_price_h6: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_H6", -30))
     # TREND: h1 fiyat değişimi bu eşikten düşükse "trend tükendi" → ele
-    trend_min_price_h1: float = field(default_factory=lambda: _float("TREND_MIN_PRICE_H1", 0))
+    # Memecoin'ler dakika dakika dalgalı; -10 daha gerçekçi
+    trend_min_price_h1: float = field(default_factory=lambda: _float("TREND_MIN_PRICE_H1", -10))
 
     # Likidite stabilitesi (in-memory snapshot tracking)
-    # Likidite son pencere içindeki zirvesinin altına bu oranda düşerse → ele
-    max_liq_drawdown_pct: float = field(default_factory=lambda: _float("MAX_LIQ_DRAWDOWN_PCT", 20))
+    # Memecoin havuzları %20 dalgalanma normal, %40 daha sağlam sinyal
+    max_liq_drawdown_pct: float = field(default_factory=lambda: _float("MAX_LIQ_DRAWDOWN_PCT", 40))
     liq_history_window_min: int = field(default_factory=lambda: _int("LIQ_HISTORY_WINDOW_MIN", 120))
     liq_history_min_age_min: int = field(default_factory=lambda: _int("LIQ_HISTORY_MIN_AGE_MIN", 20))
 
@@ -119,13 +121,15 @@ class Config:
     max_top1_holder_pct: float = field(default_factory=lambda: _float("MAX_TOP1_HOLDER_PCT", 10))
     min_holder_count: int = field(default_factory=lambda: _int("MIN_HOLDER_COUNT", 150))
     # Holder büyüme: 1h içinde belirgin düşüş → ele (insider exit / honeypot)
-    max_holder_drop_pct: float = field(default_factory=lambda: _float("MAX_HOLDER_DROP_PCT", 5))
+    # Memecoin holder turnover'ı yüksek, %12 daha gerçekçi
+    max_holder_drop_pct: float = field(default_factory=lambda: _float("MAX_HOLDER_DROP_PCT", 12))
     holder_history_min_age_min: int = field(default_factory=lambda: _int("HOLDER_HISTORY_MIN_AGE_MIN", 30))
     holder_history_window_min: int = field(default_factory=lambda: _int("HOLDER_HISTORY_WINDOW_MIN", 180))
 
     # Dev wallet (creator) takibi: serial rugger'lar
+    # Çoğu prolific deployer 10+ token açar (bazıları meşru); 15 daha makul
     dev_wallet_check_enabled: bool = field(default_factory=lambda: _bool("DEV_WALLET_CHECK_ENABLED", True))
-    max_creator_tokens: int = field(default_factory=lambda: _int("MAX_CREATOR_TOKENS", 5))
+    max_creator_tokens: int = field(default_factory=lambda: _int("MAX_CREATOR_TOKENS", 15))
 
     # Backtest / sinyal performans logu
     signal_tracking_enabled: bool = field(default_factory=lambda: _bool("SIGNAL_TRACKING_ENABLED", True))
