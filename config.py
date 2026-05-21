@@ -73,16 +73,18 @@ class Config:
     breakeven_after_tp1: bool = field(default_factory=lambda: _bool("BREAKEVEN_AFTER_TP1", True))
 
     # --- KATMAN 1: Erken giriş ---
-    early_min_liq: float = field(default_factory=lambda: _float("EARLY_MIN_LIQUIDITY", 15000))
+    # NOT: İlk 1-4 saat sniper/insider bölgesi; 4h sonrası sweet spot
+    early_min_liq: float = field(default_factory=lambda: _float("EARLY_MIN_LIQUIDITY", 25000))
     early_max_liq: float = field(default_factory=lambda: _float("EARLY_MAX_LIQUIDITY", 150000))
-    early_min_age_h: float = field(default_factory=lambda: _float("EARLY_MIN_AGE_H", 1))
+    early_min_age_h: float = field(default_factory=lambda: _float("EARLY_MIN_AGE_H", 4))
     early_max_age_h: float = field(default_factory=lambda: _float("EARLY_MAX_AGE_H", 24))
     early_min_vol_h1_ratio: float = field(default_factory=lambda: _float("EARLY_MIN_VOL_H1_RATIO", 0.5))
     early_min_price_h1: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_H1", 15))
     early_min_price_m5: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_M5", 3))
     early_min_txns_h1: int = field(default_factory=lambda: _int("EARLY_MIN_TXNS_H1", 80))
-    early_min_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MIN_BUY_RATIO", 0.58))
-    early_max_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MAX_BUY_RATIO", 0.95))
+    early_min_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MIN_BUY_RATIO", 0.60))
+    # Wash trading tipik 0.85-0.93 aralığında çalışır; üst sınırı oraya bastır
+    early_max_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MAX_BUY_RATIO", 0.88))
 
     # Ortalama işlem boyutu (wash trading / micro-spam filtresi)
     # Memecoin'lerde küçük alımlar normal — alt sınırı dar tutma
@@ -117,9 +119,14 @@ class Config:
     require_freeze_revoked: bool = field(default_factory=lambda: _bool("REQUIRE_FREEZE_REVOKED", True))
     require_lp_locked: bool = field(default_factory=lambda: _bool("REQUIRE_LP_LOCKED", True))
     min_lp_locked_pct: float = field(default_factory=lambda: _float("MIN_LP_LOCKED_PCT", 95))
-    max_top10_holder_pct: float = field(default_factory=lambda: _float("MAX_TOP10_HOLDER_PCT", 30))
-    max_top1_holder_pct: float = field(default_factory=lambda: _float("MAX_TOP1_HOLDER_PCT", 10))
-    min_holder_count: int = field(default_factory=lambda: _int("MIN_HOLDER_COUNT", 150))
+    # %95 kilit ama 1 gün vade = anlamsız; minimum kalan süre
+    min_lp_lock_days: float = field(default_factory=lambda: _float("MIN_LP_LOCK_DAYS", 30))
+    # Insider network: aynı kaynaktan finanse edilmiş cüzdan kümesi
+    max_insider_supply_pct: float = field(default_factory=lambda: _float("MAX_INSIDER_SUPPLY_PCT", 10))
+    # Gerçek dağılımda top10 nadiren %22'yi geçer; üstü sybil farm sinyali
+    max_top10_holder_pct: float = field(default_factory=lambda: _float("MAX_TOP10_HOLDER_PCT", 22))
+    max_top1_holder_pct: float = field(default_factory=lambda: _float("MAX_TOP1_HOLDER_PCT", 6))
+    min_holder_count: int = field(default_factory=lambda: _int("MIN_HOLDER_COUNT", 300))
     # Holder büyüme: 1h içinde belirgin düşüş → ele (insider exit / honeypot)
     # Memecoin holder turnover'ı yüksek, %12 daha gerçekçi
     max_holder_drop_pct: float = field(default_factory=lambda: _float("MAX_HOLDER_DROP_PCT", 12))
@@ -127,9 +134,9 @@ class Config:
     holder_history_window_min: int = field(default_factory=lambda: _int("HOLDER_HISTORY_WINDOW_MIN", 180))
 
     # Dev wallet (creator) takibi: serial rugger'lar
-    # Çoğu prolific deployer 10+ token açar (bazıları meşru); 15 daha makul
+    # Meşru takım ortalama 2-3 token açar; 10+ ciddi şüphe
     dev_wallet_check_enabled: bool = field(default_factory=lambda: _bool("DEV_WALLET_CHECK_ENABLED", True))
-    max_creator_tokens: int = field(default_factory=lambda: _int("MAX_CREATOR_TOKENS", 15))
+    max_creator_tokens: int = field(default_factory=lambda: _int("MAX_CREATOR_TOKENS", 10))
 
     # Backtest / sinyal performans logu
     signal_tracking_enabled: bool = field(default_factory=lambda: _bool("SIGNAL_TRACKING_ENABLED", True))
@@ -138,8 +145,9 @@ class Config:
     max_roundtrip_loss_pct: float = field(default_factory=lambda: _float("MAX_ROUNDTRIP_LOSS_PCT", 15))
 
     # --- Skor ---
-    min_score_to_alert: float = field(default_factory=lambda: _float("MIN_SCORE_TO_ALERT", 50))
-    high_confidence_score: float = field(default_factory=lambda: _float("HIGH_CONFIDENCE_SCORE", 70))
+    # Daha seçici: alert için 55, yüksek güven 72
+    min_score_to_alert: float = field(default_factory=lambda: _float("MIN_SCORE_TO_ALERT", 55))
+    high_confidence_score: float = field(default_factory=lambda: _float("HIGH_CONFIDENCE_SCORE", 72))
 
     # --- Loop ---
     scan_interval: int = field(default_factory=lambda: _int("SCAN_INTERVAL", 60))

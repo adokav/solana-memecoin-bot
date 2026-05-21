@@ -29,6 +29,8 @@ class SafetyReport:
     mint_revoked: bool | None = None
     freeze_revoked: bool | None = None
     lp_locked_pct: float | None = None
+    lp_lock_days_remaining: float | None = None
+    insider_supply_pct: float | None = None
     top10_pct: float | None = None
     top1_pct: float | None = None
     holder_count: int | None = None
@@ -98,37 +100,65 @@ class RugCheckClient:
             log.debug("rugcheck full report error for %s: %s", mint, e)
             return None
 
-    async def _creator_token_count(self, mint: str, summary: dict) -> tuple[str | None, int | None]:
-        """Token'ı oluşturan cüzdanın toplam token sayısı.
-        Yeniden sorgulamamak için (creator_addr -> count) cache'leniyor.
-        """
-        # Önce summary'de varsa kullan, yoksa full report'a düş
-        creator = summary.get("creator") or summary.get("deployer")
-        creator_tokens = summary.get("creatorTokens")
+    async def _enrich_from_full(self, mint: str, summary: dict) -> dict:
+        """Summary'de eksik field'ları full report'tan tamamla. Tek HTTP çağrısı."""
+        wanted = ("creator", "deployer", "creatorTokens", "insiderNetworks", "topHolders")
+        if all(summary.get(k) is not None for k in wanted):
+            return summary
+        full = await self._rugcheck_full_report(mint)
+        if not full:
+            return summary
+        merged = dict(summary)
+        for key in wanted:
+            if merged.get(key) is None and full.get(key) is not None:
+                merged[key] = full[key]
+        return merged
 
-        if creator is None or creator_tokens is None:
-            full = await self._rugcheck_full_report(mint)
-            if full:
-                creator = creator or full.get("creator") or full.get("deployer")
-                creator_tokens = creator_tokens if creator_tokens is not None else full.get("creatorTokens")
-
+    def _parse_creator(self, rc: dict) -> tuple[str | None, int | None]:
+        """RugCheck verisinden creator + deploy ettiği token sayısı."""
+        creator = rc.get("creator") or rc.get("deployer")
         if not creator:
             return None, None
-
-        # Cache lookup
+        # Cache
         cached = self._creator_cache.get(creator)
         if cached and time.time() - cached[0] < self._creator_cache_ttl:
             return creator, cached[1]
-
-        if isinstance(creator_tokens, list):
-            count = len(creator_tokens)
-        elif isinstance(creator_tokens, int):
-            count = creator_tokens
+        ct = rc.get("creatorTokens")
+        if isinstance(ct, list):
+            count = len(ct)
+        elif isinstance(ct, int):
+            count = ct
         else:
             return creator, None
-
         self._creator_cache[creator] = (time.time(), count)
         return creator, count
+
+    def _parse_insider_pct(self, rc: dict) -> float | None:
+        """Insider network'ün toplam supply yüzdesi.
+        RugCheck'in 'insiderNetworks' veya topHolders[].insider flag'inden derler.
+        """
+        pct = 0.0
+        found = False
+        for net in rc.get("insiderNetworks") or []:
+            v = net.get("tokenPctSupply") or net.get("supplyPct") or net.get("pct")
+            if v is not None:
+                try:
+                    pct += float(v)
+                    found = True
+                except (TypeError, ValueError):
+                    pass
+        if not found:
+            # Fallback: topHolders içinde 'insider' flag'i taşıyanların toplamı
+            for h in rc.get("topHolders") or []:
+                if h.get("insider"):
+                    v = h.get("pct") or h.get("uiAmountPct")
+                    if v is not None:
+                        try:
+                            pct += float(v)
+                            found = True
+                        except (TypeError, ValueError):
+                            pass
+        return pct if found else None
 
     # ---------- Helius DAS holder dağılımı ----------
 
@@ -213,20 +243,35 @@ class RugCheckClient:
             report.passed = False
             report.reasons.append(f"transfer fee {fee_pct}%")
 
-        # LP locked
-        # RugCheck'te 'markets' içinde lp lock bilgisi var
+        # LP locked: yüzde + kalan süre
         markets = rc.get("markets") or []
         lp_locked_pct = 0.0
+        lp_lock_until_ts = 0.0  # epoch saniye
         if markets:
-            # En büyük pool'un lp lock yüzdesi
             for m in markets:
                 lp = m.get("lp") or {}
                 pct = float(lp.get("lpLockedPct") or 0)
                 lp_locked_pct = max(lp_locked_pct, pct)
+                # "lpLockedUntil" ms ya da s olabilir; defensive normalize
+                until = lp.get("lpLockedUntil") or lp.get("lockUntil") or lp.get("unlockDate") or 0
+                try:
+                    until_f = float(until or 0)
+                except (TypeError, ValueError):
+                    until_f = 0
+                if until_f > 1e12:  # ms epoch
+                    until_f /= 1000
+                lp_lock_until_ts = max(lp_lock_until_ts, until_f)
         report.lp_locked_pct = lp_locked_pct
         if config.require_lp_locked and lp_locked_pct < config.min_lp_locked_pct:
             report.passed = False
             report.reasons.append(f"LP locked only {lp_locked_pct:.0f}%")
+        # LP kilit süresi (varsa kontrol et; yoksa atla — burnt LP de olabilir)
+        if lp_lock_until_ts > 0:
+            days_left = (lp_lock_until_ts - time.time()) / 86400
+            report.lp_lock_days_remaining = round(days_left, 1)
+            if days_left < config.min_lp_lock_days:
+                report.passed = False
+                report.reasons.append(f"LP unlocks in {days_left:.0f}d")
 
         # Risks array
         risks = rc.get("risks") or []
@@ -240,14 +285,24 @@ class RugCheckClient:
             elif level == "warn":
                 report.notes.append(f"warn: {name}")
 
-        # === Dev wallet (creator) kontrolü: serial rugger detection ===
+        # === Full report'tan creator + insider'ı tek API çağrısıyla zenginleştir ===
+        rc = await self._enrich_from_full(mint, rc)
+
+        # Dev wallet (creator): serial rugger detection
         if config.dev_wallet_check_enabled:
-            creator, count = await self._creator_token_count(mint, rc)
+            creator, count = self._parse_creator(rc)
             report.creator = creator
             report.creator_token_count = count
             if count is not None and count > config.max_creator_tokens:
                 report.passed = False
                 report.reasons.append(f"creator has {count} tokens (serial)")
+
+        # Insider network: aynı kaynaktan finanse edilmiş cüzdan kümeleri
+        insider_pct = self._parse_insider_pct(rc)
+        report.insider_supply_pct = insider_pct
+        if insider_pct is not None and insider_pct > config.max_insider_supply_pct:
+            report.passed = False
+            report.reasons.append(f"insider network holds {insider_pct:.1f}%")
 
         # === Helius: holder dağılımı ===
         holders_data = await self._helius_holders(mint)
