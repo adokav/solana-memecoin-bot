@@ -33,6 +33,8 @@ class SafetyReport:
     top1_pct: float | None = None
     holder_count: int | None = None
     danger_risks: list[str] = field(default_factory=list)
+    creator: str | None = None
+    creator_token_count: int | None = None
 
 
 class RugCheckClient:
@@ -46,6 +48,9 @@ class RugCheckClient:
         self._cache_ttl = 600  # 10 dakika
         # mint -> [(ts, holder_count), ...]  holder sayısı zaman serisi
         self._holder_history: dict[str, list[tuple[float, int]]] = {}
+        # creator_addr -> (ts, token_count)  creator sorgu cache (24h)
+        self._creator_cache: dict[str, tuple[float, int]] = {}
+        self._creator_cache_ttl = 86400
 
     def _record_holders(self, mint: str, count: int) -> None:
         now = time.time()
@@ -81,6 +86,49 @@ class RugCheckClient:
         except httpx.HTTPError as e:
             log.warning("rugcheck error for %s: %s", mint, e)
             return None
+
+    async def _rugcheck_full_report(self, mint: str) -> dict | None:
+        try:
+            r = await self._http.get(f"{RUGCHECK_BASE}/tokens/{mint}/report")
+            if r.status_code == 404:
+                return None
+            r.raise_for_status()
+            return r.json()
+        except httpx.HTTPError as e:
+            log.debug("rugcheck full report error for %s: %s", mint, e)
+            return None
+
+    async def _creator_token_count(self, mint: str, summary: dict) -> tuple[str | None, int | None]:
+        """Token'ı oluşturan cüzdanın toplam token sayısı.
+        Yeniden sorgulamamak için (creator_addr -> count) cache'leniyor.
+        """
+        # Önce summary'de varsa kullan, yoksa full report'a düş
+        creator = summary.get("creator") or summary.get("deployer")
+        creator_tokens = summary.get("creatorTokens")
+
+        if creator is None or creator_tokens is None:
+            full = await self._rugcheck_full_report(mint)
+            if full:
+                creator = creator or full.get("creator") or full.get("deployer")
+                creator_tokens = creator_tokens if creator_tokens is not None else full.get("creatorTokens")
+
+        if not creator:
+            return None, None
+
+        # Cache lookup
+        cached = self._creator_cache.get(creator)
+        if cached and time.time() - cached[0] < self._creator_cache_ttl:
+            return creator, cached[1]
+
+        if isinstance(creator_tokens, list):
+            count = len(creator_tokens)
+        elif isinstance(creator_tokens, int):
+            count = creator_tokens
+        else:
+            return creator, None
+
+        self._creator_cache[creator] = (time.time(), count)
+        return creator, count
 
     # ---------- Helius DAS holder dağılımı ----------
 
@@ -191,6 +239,15 @@ class RugCheckClient:
                 report.reasons.append(f"danger: {name}")
             elif level == "warn":
                 report.notes.append(f"warn: {name}")
+
+        # === Dev wallet (creator) kontrolü: serial rugger detection ===
+        if config.dev_wallet_check_enabled:
+            creator, count = await self._creator_token_count(mint, rc)
+            report.creator = creator
+            report.creator_token_count = count
+            if count is not None and count > config.max_creator_tokens:
+                report.passed = False
+                report.reasons.append(f"creator has {count} tokens (serial)")
 
         # === Helius: holder dağılımı ===
         holders_data = await self._helius_holders(mint)

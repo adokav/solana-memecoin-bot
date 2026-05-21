@@ -122,6 +122,14 @@ class Config:
     max_holder_drop_pct: float = field(default_factory=lambda: _float("MAX_HOLDER_DROP_PCT", 5))
     holder_history_min_age_min: int = field(default_factory=lambda: _int("HOLDER_HISTORY_MIN_AGE_MIN", 30))
     holder_history_window_min: int = field(default_factory=lambda: _int("HOLDER_HISTORY_WINDOW_MIN", 180))
+
+    # Dev wallet (creator) takibi: serial rugger'lar
+    dev_wallet_check_enabled: bool = field(default_factory=lambda: _bool("DEV_WALLET_CHECK_ENABLED", True))
+    max_creator_tokens: int = field(default_factory=lambda: _int("MAX_CREATOR_TOKENS", 5))
+
+    # Backtest / sinyal performans logu
+    signal_tracking_enabled: bool = field(default_factory=lambda: _bool("SIGNAL_TRACKING_ENABLED", True))
+    signal_tracking_interval: int = field(default_factory=lambda: _int("SIGNAL_TRACKING_INTERVAL", 600))
     max_price_impact_pct: float = field(default_factory=lambda: _float("MAX_PRICE_IMPACT_PCT", 5))
     max_roundtrip_loss_pct: float = field(default_factory=lambda: _float("MAX_ROUNDTRIP_LOSS_PCT", 15))
 

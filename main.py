@@ -17,6 +17,7 @@ from jupiter import Jupiter, LAMPORTS_PER_SOL
 from monitor import Monitor
 from rugcheck import RugCheckClient, SafetyReport
 from screener import Candidate, Screener
+from signal_log import SignalLog
 from storage import Position, Store
 from telegram_handler import TelegramHub, set_buy_callback
 from wallet import load_keypair
@@ -37,6 +38,7 @@ class Bot:
         self.store = Store.load()
         self.tg = TelegramHub()
         self.screener = Screener(self.ds)
+        self.signal_log = SignalLog()
         self.monitor = Monitor(self.ds, self.jup, self.store, self.tg)
         self._stop = asyncio.Event()
         self._last_scan_ts: float = 0
@@ -111,6 +113,26 @@ class Bot:
                 lines.append(f"• ${p.symbol} (fiyat alınamadı)")
         return "\n".join(lines)
 
+    # ---------- /perf ----------
+
+    async def perf_text(self) -> str:
+        s = self.signal_log.stats()
+        if s.get("total", 0) == 0:
+            pending = len(self.signal_log.pending())
+            return (
+                f"📊 <b>Sinyal performansı</b>\n"
+                f"Henüz finalize sinyal yok (24h beklenir).\n"
+                f"Beklemede: <code>{pending}</code>"
+            )
+        return (
+            f"📊 <b>Sinyal performansı</b> (finalize: {s['total']})\n"
+            f"Ort. zirve 1h: <code>{s['avg_peak_1h']:+.1f}%</code>\n"
+            f"Ort. zirve 24h: <code>{s['avg_peak_24h']:+.1f}%</code>\n"
+            f"+30% isabet (24h): <code>{s['hit_rate_30pct_24h']:.0f}%</code>\n"
+            f"+100% isabet (24h): <code>{s['hit_rate_100pct_24h']:.0f}%</code>\n"
+            f"Beklemede: <code>{s['pending']}</code>"
+        )
+
     # ---------- /health ----------
 
     async def health_text(self) -> str:
@@ -163,6 +185,17 @@ class Bot:
 
                     await self.tg.alert(c, safety)
                     self.screener.mark_alerted(c.base_token, c.score + safety.score)
+                    if config.signal_tracking_enabled:
+                        self.signal_log.add(
+                            token=c.base_token,
+                            pair=c.pair_address,
+                            symbol=c.base_symbol,
+                            profile=c.profile,
+                            entry_price_usd=c.price_usd,
+                            score=c.score,
+                            safety_score=safety.score,
+                            score_breakdown=c.score_breakdown,
+                        )
                     self._last_alert_ts = time.time()
                     sent += 1
 
@@ -180,6 +213,30 @@ class Bot:
             except Exception:
                 log.exception("monitor loop error")
             await asyncio.sleep(config.monitor_interval)
+
+    # ---------- Loop: sinyal performans takibi (backtest data) ----------
+
+    async def tracking_loop(self) -> None:
+        while not self._stop.is_set():
+            await asyncio.sleep(config.signal_tracking_interval)
+            if not config.signal_tracking_enabled:
+                continue
+            try:
+                pending = self.signal_log.pending()
+                if not pending:
+                    continue
+                updated = 0
+                for sig in pending:
+                    pair = await self.ds.pair("solana", sig.pair)
+                    price = float((pair or {}).get("priceUsd") or 0) if pair else 0
+                    if price > 0:
+                        self.signal_log.update_with_price(sig, price)
+                        updated += 1
+                if updated:
+                    self.signal_log.save()
+                    log.info("signal tracking: updated %d/%d pending", updated, len(pending))
+            except Exception:
+                log.exception("tracking loop error")
 
     # ---------- Loop: heartbeat ----------
 
@@ -199,6 +256,7 @@ class Bot:
         set_buy_callback(self.on_buy)
         self.tg.set_status_callback(self.status_text)
         self.tg.set_health_callback(self.health_text)
+        self.tg.set_perf_callback(self.perf_text)
 
         await self.tg.start()
         await self.tg.info(
@@ -220,6 +278,7 @@ class Bot:
             asyncio.create_task(self.scan_loop(), name="scan"),
             asyncio.create_task(self.monitor_loop(), name="monitor"),
             asyncio.create_task(self.heartbeat_loop(), name="heartbeat"),
+            asyncio.create_task(self.tracking_loop(), name="tracking"),
         ]
 
         await self._stop.wait()
