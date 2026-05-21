@@ -117,11 +117,18 @@ def _basic_sanity(c: Candidate) -> tuple[bool, str]:
     # Honeypot klasiği: hiç satış olmamış
     if c.txns_h1 >= 20 and c.sells_h1 == 0:
         return False, "no sells (honeypot suspicion)"
-    # Wash trading şüphesi
-    if c.txns_h1 >= 50 and c.buys_h1 > 0:
+    # Wash trading şüphesi (üst sınır)
+    if c.txns_h1 >= 50:
         buy_ratio = c.buys_h1 / max(c.txns_h1, 1)
-        if buy_ratio > 0.95:
-            return False, "wash trading suspicion (95%+ buys)"
+        if buy_ratio > config.early_max_buy_ratio:
+            return False, f"wash trading suspicion ({buy_ratio:.0%} buys)"
+    # Ortalama işlem boyutu: çok küçük = micro-spam, çok büyük = whale wash
+    if c.txns_h1 >= config.avg_tx_min_txns and c.volume_h1 > 0:
+        avg_tx = c.volume_h1 / c.txns_h1
+        if avg_tx < config.min_avg_tx_size_usd:
+            return False, f"avg tx too small: ${avg_tx:.1f} (micro-spam)"
+        if avg_tx > config.max_avg_tx_size_usd:
+            return False, f"avg tx too large: ${avg_tx:.0f} (whale/wash)"
     return True, "ok"
 
 
@@ -139,6 +146,9 @@ def _check_early(c: Candidate) -> tuple[bool, str]:
         return False, f"early h1 weak: {c.price_change_h1:.1f}%"
     if c.price_change_m5 < config.early_min_price_m5:
         return False, f"early m5 weak: {c.price_change_m5:.1f}%"
+    # Multi-timeframe: h6 büyük dump'tan sonra toparlanma sahte sinyal verebilir
+    if c.price_change_h6 < config.early_min_price_h6:
+        return False, f"early h6 crashed: {c.price_change_h6:.1f}%"
     if c.txns_h1 < config.early_min_txns_h1:
         return False, f"early txns low: {c.txns_h1}"
     buy_ratio = c.buys_h1 / max(c.txns_h1, 1)
@@ -158,6 +168,9 @@ def _check_trend(c: Candidate) -> tuple[bool, str]:
         return False, f"trend h6 weak: {c.price_change_h6:.1f}%"
     if c.price_change_h24 < config.trend_min_price_h24:
         return False, f"trend h24 weak: {c.price_change_h24:.1f}%"
+    # Multi-timeframe: h1 negatifse trend zirvede / dönüyor olabilir
+    if c.price_change_h1 < config.trend_min_price_h1:
+        return False, f"trend h1 reversing: {c.price_change_h1:.1f}%"
     if c.txns_h1 < config.trend_min_txns_h1:
         return False, f"trend txns low: {c.txns_h1}"
     return True, "trend ok"
@@ -192,15 +205,15 @@ def _score(c: Candidate) -> tuple[float, dict]:
     accel_score = min(10.0, accel * 6.67)  # 1.5x = tam puan
     breakdown["acceleration"] = round(accel_score, 1)
 
-    # Boost + sosyal (max 10)
+    # Boost + sosyal (max 10) - gerçek proje işareti olarak twitter+website kombosunu ödüllendir
     social = 0
     if c.boosts_active > 0:
-        social += 4
-    if c.has_twitter:
+        social += 3  # boosts paralı, ağırlık biraz düşük
+    if c.has_twitter and c.has_website:
+        social += 5  # kombo: ciddi proje sinyali
+    elif c.has_twitter or c.has_website:
         social += 2
     if c.has_telegram:
-        social += 2
-    if c.has_website:
         social += 2
     breakdown["social"] = min(10, social)
 
@@ -247,15 +260,47 @@ def _score(c: Candidate) -> tuple[float, dict]:
 class Screener:
     def __init__(self, ds: DexScreener) -> None:
         self.ds = ds
-        # {base_token: last_alerted_ts}
-        self._cooldown: dict[str, float] = {}
+        # {base_token: (last_alerted_ts, score)}  score=0 → red (rug/honeypot), uzun cooldown
+        self._cooldown: dict[str, tuple[float, float]] = {}
+        # {base_token: [(ts, liquidity_usd), ...]}  son N dakikadaki likidite snapshot'ları
+        self._liq_history: dict[str, list[tuple[float, float]]] = {}
+
+    def _record_liquidity(self, token: str, liq: float) -> None:
+        now = time.time()
+        cutoff = now - config.liq_history_window_min * 60
+        hist = [(ts, lq) for ts, lq in self._liq_history.get(token, []) if ts > cutoff]
+        hist.append((now, liq))
+        self._liq_history[token] = hist
+
+    def _liquidity_drawdown(self, token: str, current_liq: float) -> float | None:
+        """En eski snapshot yeterince eskiyse, peak'ten % düşüşü döner. Yoksa None."""
+        hist = self._liq_history.get(token) or []
+        if not hist:
+            return None
+        oldest_ts = hist[0][0]
+        if (time.time() - oldest_ts) < config.liq_history_min_age_min * 60:
+            return None
+        peak = max(lq for _, lq in hist)
+        if peak <= 0:
+            return None
+        return (peak - current_liq) / peak * 100
+
+    def _cooldown_hours_for(self, score: float) -> float:
+        if score >= config.high_confidence_score:
+            return config.cooldown_hours_high
+        if score >= config.min_score_to_alert:
+            return config.cooldown_hours_mid
+        return config.cooldown_hours_reject
 
     def _on_cooldown(self, token: str) -> bool:
-        last = self._cooldown.get(token, 0)
-        return (time.time() - last) < (config.cooldown_hours * 3600)
+        entry = self._cooldown.get(token)
+        if not entry:
+            return False
+        last_ts, last_score = entry
+        return (time.time() - last_ts) < (self._cooldown_hours_for(last_score) * 3600)
 
-    def mark_alerted(self, token: str) -> None:
-        self._cooldown[token] = time.time()
+    def mark_alerted(self, token: str, score: float = 0.0) -> None:
+        self._cooldown[token] = (time.time(), score)
 
     async def scan(self) -> list[Candidate]:
         """Yeni token havuzunu çek, ikili profilden geçenleri döner (skorla sıralı)."""
@@ -293,6 +338,13 @@ class Screener:
             ok, reason = _basic_sanity(c)
             if not ok:
                 log.debug("sanity skip %s: %s", c.base_symbol, reason)
+                continue
+
+            # Likidite stabilitesi: snapshot kaydet, drawdown kontrol et
+            self._record_liquidity(c.base_token, c.liquidity_usd)
+            drawdown = self._liquidity_drawdown(c.base_token, c.liquidity_usd)
+            if drawdown is not None and drawdown > config.max_liq_drawdown_pct:
+                log.debug("liq drawdown skip %s: -%.1f%%", c.base_symbol, drawdown)
                 continue
 
             # İkili profil değerlendirmesi

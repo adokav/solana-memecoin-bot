@@ -33,6 +33,8 @@ class SafetyReport:
     top1_pct: float | None = None
     holder_count: int | None = None
     danger_risks: list[str] = field(default_factory=list)
+    creator: str | None = None
+    creator_token_count: int | None = None
 
 
 class RugCheckClient:
@@ -44,6 +46,30 @@ class RugCheckClient:
         # token -> (timestamp, SafetyReport) basit cache
         self._cache: dict[str, tuple[float, SafetyReport]] = {}
         self._cache_ttl = 600  # 10 dakika
+        # mint -> [(ts, holder_count), ...]  holder sayısı zaman serisi
+        self._holder_history: dict[str, list[tuple[float, int]]] = {}
+        # creator_addr -> (ts, token_count)  creator sorgu cache (24h)
+        self._creator_cache: dict[str, tuple[float, int]] = {}
+        self._creator_cache_ttl = 86400
+
+    def _record_holders(self, mint: str, count: int) -> None:
+        now = time.time()
+        cutoff = now - config.holder_history_window_min * 60
+        hist = [(ts, n) for ts, n in self._holder_history.get(mint, []) if ts > cutoff]
+        hist.append((now, count))
+        self._holder_history[mint] = hist
+
+    def _holder_growth_pct(self, mint: str, current: int) -> float | None:
+        """Yeterince eski snapshot varsa % değişim (pozitif=büyüme). Yoksa None."""
+        hist = self._holder_history.get(mint) or []
+        if not hist:
+            return None
+        oldest_ts, oldest_n = hist[0]
+        if (time.time() - oldest_ts) < config.holder_history_min_age_min * 60:
+            return None
+        if oldest_n <= 0:
+            return None
+        return (current - oldest_n) / oldest_n * 100
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -60,6 +86,49 @@ class RugCheckClient:
         except httpx.HTTPError as e:
             log.warning("rugcheck error for %s: %s", mint, e)
             return None
+
+    async def _rugcheck_full_report(self, mint: str) -> dict | None:
+        try:
+            r = await self._http.get(f"{RUGCHECK_BASE}/tokens/{mint}/report")
+            if r.status_code == 404:
+                return None
+            r.raise_for_status()
+            return r.json()
+        except httpx.HTTPError as e:
+            log.debug("rugcheck full report error for %s: %s", mint, e)
+            return None
+
+    async def _creator_token_count(self, mint: str, summary: dict) -> tuple[str | None, int | None]:
+        """Token'ı oluşturan cüzdanın toplam token sayısı.
+        Yeniden sorgulamamak için (creator_addr -> count) cache'leniyor.
+        """
+        # Önce summary'de varsa kullan, yoksa full report'a düş
+        creator = summary.get("creator") or summary.get("deployer")
+        creator_tokens = summary.get("creatorTokens")
+
+        if creator is None or creator_tokens is None:
+            full = await self._rugcheck_full_report(mint)
+            if full:
+                creator = creator or full.get("creator") or full.get("deployer")
+                creator_tokens = creator_tokens if creator_tokens is not None else full.get("creatorTokens")
+
+        if not creator:
+            return None, None
+
+        # Cache lookup
+        cached = self._creator_cache.get(creator)
+        if cached and time.time() - cached[0] < self._creator_cache_ttl:
+            return creator, cached[1]
+
+        if isinstance(creator_tokens, list):
+            count = len(creator_tokens)
+        elif isinstance(creator_tokens, int):
+            count = creator_tokens
+        else:
+            return creator, None
+
+        self._creator_cache[creator] = (time.time(), count)
+        return creator, count
 
     # ---------- Helius DAS holder dağılımı ----------
 
@@ -171,6 +240,15 @@ class RugCheckClient:
             elif level == "warn":
                 report.notes.append(f"warn: {name}")
 
+        # === Dev wallet (creator) kontrolü: serial rugger detection ===
+        if config.dev_wallet_check_enabled:
+            creator, count = await self._creator_token_count(mint, rc)
+            report.creator = creator
+            report.creator_token_count = count
+            if count is not None and count > config.max_creator_tokens:
+                report.passed = False
+                report.reasons.append(f"creator has {count} tokens (serial)")
+
         # === Helius: holder dağılımı ===
         holders_data = await self._helius_holders(mint)
         supply = await self._token_supply(mint)
@@ -204,11 +282,18 @@ class RugCheckClient:
 
         # Holder sayısı - RugCheck'ten
         total_holders = rc.get("totalHolders") or rc.get("holderCount") or 0
+        holder_growth_pct: float | None = None
         if total_holders:
             report.holder_count = int(total_holders)
             if report.holder_count < config.min_holder_count:
                 report.passed = False
                 report.reasons.append(f"only {report.holder_count} holders")
+            # Holder büyüme takibi: belirgin düşüş = insider exit sinyali
+            self._record_holders(mint, report.holder_count)
+            holder_growth_pct = self._holder_growth_pct(mint, report.holder_count)
+            if holder_growth_pct is not None and holder_growth_pct < -config.max_holder_drop_pct:
+                report.passed = False
+                report.reasons.append(f"holders dropped {holder_growth_pct:.1f}%")
 
         # === Skor katkısı (max 10) ===
         if report.passed:
@@ -226,6 +311,9 @@ class RugCheckClient:
             elif report.top10_pct is not None and report.top10_pct < 25:
                 sc += 1
             if report.holder_count and report.holder_count > 500:
+                sc += 1
+            # Pozitif holder büyümesi bonus (organik ilgi)
+            if holder_growth_pct is not None and holder_growth_pct > 5:
                 sc += 1
             report.score = min(10.0, sc)
 

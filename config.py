@@ -81,7 +81,13 @@ class Config:
     early_min_price_h1: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_H1", 15))
     early_min_price_m5: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_M5", 3))
     early_min_txns_h1: int = field(default_factory=lambda: _int("EARLY_MIN_TXNS_H1", 80))
-    early_min_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MIN_BUY_RATIO", 0.57))
+    early_min_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MIN_BUY_RATIO", 0.62))
+    early_max_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MAX_BUY_RATIO", 0.92))
+
+    # Ortalama işlem boyutu (wash trading / micro-spam filtresi)
+    min_avg_tx_size_usd: float = field(default_factory=lambda: _float("MIN_AVG_TX_SIZE_USD", 20))
+    max_avg_tx_size_usd: float = field(default_factory=lambda: _float("MAX_AVG_TX_SIZE_USD", 300))
+    avg_tx_min_txns: int = field(default_factory=lambda: _int("AVG_TX_MIN_TXNS", 30))
 
     # --- KATMAN 1: Trend takip ---
     trend_min_liq: float = field(default_factory=lambda: _float("TREND_MIN_LIQUIDITY", 50000))
@@ -92,6 +98,18 @@ class Config:
     trend_min_price_h24: float = field(default_factory=lambda: _float("TREND_MIN_PRICE_H24", 50))
     trend_min_txns_h1: int = field(default_factory=lambda: _int("TREND_MIN_TXNS_H1", 150))
 
+    # Multi-timeframe momentum confirmation
+    # EARLY: h6 fiyat değişimi bu eşikten düşükse "toparlanma" şüphesi → ele
+    early_min_price_h6: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_H6", -20))
+    # TREND: h1 fiyat değişimi bu eşikten düşükse "trend tükendi" → ele
+    trend_min_price_h1: float = field(default_factory=lambda: _float("TREND_MIN_PRICE_H1", 0))
+
+    # Likidite stabilitesi (in-memory snapshot tracking)
+    # Likidite son pencere içindeki zirvesinin altına bu oranda düşerse → ele
+    max_liq_drawdown_pct: float = field(default_factory=lambda: _float("MAX_LIQ_DRAWDOWN_PCT", 20))
+    liq_history_window_min: int = field(default_factory=lambda: _int("LIQ_HISTORY_WINDOW_MIN", 120))
+    liq_history_min_age_min: int = field(default_factory=lambda: _int("LIQ_HISTORY_MIN_AGE_MIN", 20))
+
     # --- KATMAN 2: Anti-rug ---
     require_mint_revoked: bool = field(default_factory=lambda: _bool("REQUIRE_MINT_REVOKED", True))
     require_freeze_revoked: bool = field(default_factory=lambda: _bool("REQUIRE_FREEZE_REVOKED", True))
@@ -100,6 +118,18 @@ class Config:
     max_top10_holder_pct: float = field(default_factory=lambda: _float("MAX_TOP10_HOLDER_PCT", 30))
     max_top1_holder_pct: float = field(default_factory=lambda: _float("MAX_TOP1_HOLDER_PCT", 10))
     min_holder_count: int = field(default_factory=lambda: _int("MIN_HOLDER_COUNT", 150))
+    # Holder büyüme: 1h içinde belirgin düşüş → ele (insider exit / honeypot)
+    max_holder_drop_pct: float = field(default_factory=lambda: _float("MAX_HOLDER_DROP_PCT", 5))
+    holder_history_min_age_min: int = field(default_factory=lambda: _int("HOLDER_HISTORY_MIN_AGE_MIN", 30))
+    holder_history_window_min: int = field(default_factory=lambda: _int("HOLDER_HISTORY_WINDOW_MIN", 180))
+
+    # Dev wallet (creator) takibi: serial rugger'lar
+    dev_wallet_check_enabled: bool = field(default_factory=lambda: _bool("DEV_WALLET_CHECK_ENABLED", True))
+    max_creator_tokens: int = field(default_factory=lambda: _int("MAX_CREATOR_TOKENS", 5))
+
+    # Backtest / sinyal performans logu
+    signal_tracking_enabled: bool = field(default_factory=lambda: _bool("SIGNAL_TRACKING_ENABLED", True))
+    signal_tracking_interval: int = field(default_factory=lambda: _int("SIGNAL_TRACKING_INTERVAL", 600))
     max_price_impact_pct: float = field(default_factory=lambda: _float("MAX_PRICE_IMPACT_PCT", 5))
     max_roundtrip_loss_pct: float = field(default_factory=lambda: _float("MAX_ROUNDTRIP_LOSS_PCT", 15))
 
@@ -113,7 +143,10 @@ class Config:
     heartbeat_interval: int = field(default_factory=lambda: _int("HEARTBEAT_INTERVAL", 300))
 
     # --- Anti-spam ---
-    cooldown_hours: float = field(default_factory=lambda: _float("COOLDOWN_HOURS", 24))
+    # Sinyal skoruna göre değişken cooldown: yüksek skor → kısa cooldown (fırsat kaçırma)
+    cooldown_hours_high: float = field(default_factory=lambda: _float("COOLDOWN_HOURS_HIGH", 6))
+    cooldown_hours_mid: float = field(default_factory=lambda: _float("COOLDOWN_HOURS_MID", 12))
+    cooldown_hours_reject: float = field(default_factory=lambda: _float("COOLDOWN_HOURS_REJECT", 24))
     max_alerts_per_scan: int = field(default_factory=lambda: _int("MAX_ALERTS_PER_SCAN", 3))
 
     # --- Sabitler ---
