@@ -162,7 +162,7 @@ class Bot:
                     )
 
                     await self.tg.alert(c, safety)
-                    self.screener.mark_alerted(c.base_token)
+                    self.screener.mark_alerted(c.base_token, c.score + safety.score)
                     self._last_alert_ts = time.time()
                     sent += 1
 

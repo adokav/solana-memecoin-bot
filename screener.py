@@ -117,11 +117,18 @@ def _basic_sanity(c: Candidate) -> tuple[bool, str]:
     # Honeypot klasiği: hiç satış olmamış
     if c.txns_h1 >= 20 and c.sells_h1 == 0:
         return False, "no sells (honeypot suspicion)"
-    # Wash trading şüphesi
-    if c.txns_h1 >= 50 and c.buys_h1 > 0:
+    # Wash trading şüphesi (üst sınır)
+    if c.txns_h1 >= 50:
         buy_ratio = c.buys_h1 / max(c.txns_h1, 1)
-        if buy_ratio > 0.95:
-            return False, "wash trading suspicion (95%+ buys)"
+        if buy_ratio > config.early_max_buy_ratio:
+            return False, f"wash trading suspicion ({buy_ratio:.0%} buys)"
+    # Ortalama işlem boyutu: çok küçük = micro-spam, çok büyük = whale wash
+    if c.txns_h1 >= config.avg_tx_min_txns and c.volume_h1 > 0:
+        avg_tx = c.volume_h1 / c.txns_h1
+        if avg_tx < config.min_avg_tx_size_usd:
+            return False, f"avg tx too small: ${avg_tx:.1f} (micro-spam)"
+        if avg_tx > config.max_avg_tx_size_usd:
+            return False, f"avg tx too large: ${avg_tx:.0f} (whale/wash)"
     return True, "ok"
 
 
@@ -247,15 +254,25 @@ def _score(c: Candidate) -> tuple[float, dict]:
 class Screener:
     def __init__(self, ds: DexScreener) -> None:
         self.ds = ds
-        # {base_token: last_alerted_ts}
-        self._cooldown: dict[str, float] = {}
+        # {base_token: (last_alerted_ts, score)}  score=0 → red (rug/honeypot), uzun cooldown
+        self._cooldown: dict[str, tuple[float, float]] = {}
+
+    def _cooldown_hours_for(self, score: float) -> float:
+        if score >= config.high_confidence_score:
+            return config.cooldown_hours_high
+        if score >= config.min_score_to_alert:
+            return config.cooldown_hours_mid
+        return config.cooldown_hours_reject
 
     def _on_cooldown(self, token: str) -> bool:
-        last = self._cooldown.get(token, 0)
-        return (time.time() - last) < (config.cooldown_hours * 3600)
+        entry = self._cooldown.get(token)
+        if not entry:
+            return False
+        last_ts, last_score = entry
+        return (time.time() - last_ts) < (self._cooldown_hours_for(last_score) * 3600)
 
-    def mark_alerted(self, token: str) -> None:
-        self._cooldown[token] = time.time()
+    def mark_alerted(self, token: str, score: float = 0.0) -> None:
+        self._cooldown[token] = (time.time(), score)
 
     async def scan(self) -> list[Candidate]:
         """Yeni token havuzunu çek, ikili profilden geçenleri döner (skorla sıralı)."""

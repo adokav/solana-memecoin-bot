@@ -81,7 +81,13 @@ class Config:
     early_min_price_h1: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_H1", 15))
     early_min_price_m5: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_M5", 3))
     early_min_txns_h1: int = field(default_factory=lambda: _int("EARLY_MIN_TXNS_H1", 80))
-    early_min_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MIN_BUY_RATIO", 0.57))
+    early_min_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MIN_BUY_RATIO", 0.62))
+    early_max_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MAX_BUY_RATIO", 0.92))
+
+    # Ortalama işlem boyutu (wash trading / micro-spam filtresi)
+    min_avg_tx_size_usd: float = field(default_factory=lambda: _float("MIN_AVG_TX_SIZE_USD", 20))
+    max_avg_tx_size_usd: float = field(default_factory=lambda: _float("MAX_AVG_TX_SIZE_USD", 300))
+    avg_tx_min_txns: int = field(default_factory=lambda: _int("AVG_TX_MIN_TXNS", 30))
 
     # --- KATMAN 1: Trend takip ---
     trend_min_liq: float = field(default_factory=lambda: _float("TREND_MIN_LIQUIDITY", 50000))
@@ -113,7 +119,10 @@ class Config:
     heartbeat_interval: int = field(default_factory=lambda: _int("HEARTBEAT_INTERVAL", 300))
 
     # --- Anti-spam ---
-    cooldown_hours: float = field(default_factory=lambda: _float("COOLDOWN_HOURS", 24))
+    # Sinyal skoruna göre değişken cooldown: yüksek skor → kısa cooldown (fırsat kaçırma)
+    cooldown_hours_high: float = field(default_factory=lambda: _float("COOLDOWN_HOURS_HIGH", 6))
+    cooldown_hours_mid: float = field(default_factory=lambda: _float("COOLDOWN_HOURS_MID", 12))
+    cooldown_hours_reject: float = field(default_factory=lambda: _float("COOLDOWN_HOURS_REJECT", 24))
     max_alerts_per_scan: int = field(default_factory=lambda: _int("MAX_ALERTS_PER_SCAN", 3))
 
     # --- Sabitler ---
