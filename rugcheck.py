@@ -44,6 +44,27 @@ class RugCheckClient:
         # token -> (timestamp, SafetyReport) basit cache
         self._cache: dict[str, tuple[float, SafetyReport]] = {}
         self._cache_ttl = 600  # 10 dakika
+        # mint -> [(ts, holder_count), ...]  holder sayısı zaman serisi
+        self._holder_history: dict[str, list[tuple[float, int]]] = {}
+
+    def _record_holders(self, mint: str, count: int) -> None:
+        now = time.time()
+        cutoff = now - config.holder_history_window_min * 60
+        hist = [(ts, n) for ts, n in self._holder_history.get(mint, []) if ts > cutoff]
+        hist.append((now, count))
+        self._holder_history[mint] = hist
+
+    def _holder_growth_pct(self, mint: str, current: int) -> float | None:
+        """Yeterince eski snapshot varsa % değişim (pozitif=büyüme). Yoksa None."""
+        hist = self._holder_history.get(mint) or []
+        if not hist:
+            return None
+        oldest_ts, oldest_n = hist[0]
+        if (time.time() - oldest_ts) < config.holder_history_min_age_min * 60:
+            return None
+        if oldest_n <= 0:
+            return None
+        return (current - oldest_n) / oldest_n * 100
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -204,11 +225,18 @@ class RugCheckClient:
 
         # Holder sayısı - RugCheck'ten
         total_holders = rc.get("totalHolders") or rc.get("holderCount") or 0
+        holder_growth_pct: float | None = None
         if total_holders:
             report.holder_count = int(total_holders)
             if report.holder_count < config.min_holder_count:
                 report.passed = False
                 report.reasons.append(f"only {report.holder_count} holders")
+            # Holder büyüme takibi: belirgin düşüş = insider exit sinyali
+            self._record_holders(mint, report.holder_count)
+            holder_growth_pct = self._holder_growth_pct(mint, report.holder_count)
+            if holder_growth_pct is not None and holder_growth_pct < -config.max_holder_drop_pct:
+                report.passed = False
+                report.reasons.append(f"holders dropped {holder_growth_pct:.1f}%")
 
         # === Skor katkısı (max 10) ===
         if report.passed:
@@ -226,6 +254,9 @@ class RugCheckClient:
             elif report.top10_pct is not None and report.top10_pct < 25:
                 sc += 1
             if report.holder_count and report.holder_count > 500:
+                sc += 1
+            # Pozitif holder büyümesi bonus (organik ilgi)
+            if holder_growth_pct is not None and holder_growth_pct > 5:
                 sc += 1
             report.score = min(10.0, sc)
 
