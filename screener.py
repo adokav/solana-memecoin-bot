@@ -306,12 +306,12 @@ class Screener:
         """Yeni token havuzunu çek, ikili profilden geçenleri döner (skorla sıralı)."""
         seen_tokens: set[str] = set()
         sol_tokens: list[str] = []
+        on_cd = 0
 
-        for source in (
-            await self.ds.latest_profiles(),
-            await self.ds.latest_boosted(),
-            await self.ds.top_boosted(),
-        ):
+        src_profiles = await self.ds.latest_profiles()
+        src_latest = await self.ds.latest_boosted()
+        src_top = await self.ds.top_boosted()
+        for source in (src_profiles, src_latest, src_top):
             for item in source:
                 if item.get("chainId") != "solana":
                     continue
@@ -319,32 +319,50 @@ class Screener:
                 if not addr or addr in seen_tokens:
                     continue
                 seen_tokens.add(addr)
-                if not self._on_cooldown(addr):
+                if self._on_cooldown(addr):
+                    on_cd += 1
+                else:
                     sol_tokens.append(addr)
 
+        log.info(
+            "scan src: profiles=%d boosted=%d top=%d | sol unique=%d | cooldown=%d | to_fetch=%d",
+            len(src_profiles), len(src_latest), len(src_top),
+            len(seen_tokens), on_cd, min(len(sol_tokens), 80),
+        )
+
+        # Filtre cut sayaçları (gözlem için)
+        cuts = {
+            "no_pairs": 0, "parse_fail": 0, "sanity": 0,
+            "liq_drawdown": 0, "profile": 0, "low_score": 0,
+        }
+        sample_reasons: dict[str, list[str]] = {"sanity": [], "profile": []}
+
         candidates: list[Candidate] = []
-        for token in sol_tokens[:80]:  # işlem yükünü kapla
+        for token in sol_tokens[:80]:
             pairs = await self.ds.pairs_for_token("solana", token)
             if not pairs:
+                cuts["no_pairs"] += 1
                 continue
-            # En likit pair
             pairs.sort(
                 key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0),
                 reverse=True,
             )
             c = _parse_pair(pairs[0])
             if not c:
+                cuts["parse_fail"] += 1
                 continue
             ok, reason = _basic_sanity(c)
             if not ok:
-                log.debug("sanity skip %s: %s", c.base_symbol, reason)
+                cuts["sanity"] += 1
+                if len(sample_reasons["sanity"]) < 3:
+                    sample_reasons["sanity"].append(f"{c.base_symbol}:{reason}")
                 continue
 
             # Likidite stabilitesi: snapshot kaydet, drawdown kontrol et
             self._record_liquidity(c.base_token, c.liquidity_usd)
             drawdown = self._liquidity_drawdown(c.base_token, c.liquidity_usd)
             if drawdown is not None and drawdown > config.max_liq_drawdown_pct:
-                log.debug("liq drawdown skip %s: -%.1f%%", c.base_symbol, drawdown)
+                cuts["liq_drawdown"] += 1
                 continue
 
             # İkili profil değerlendirmesi
@@ -356,8 +374,11 @@ class Screener:
             elif passed_trend:
                 c.profile = "trend"
             else:
-                log.debug("both profiles skip %s: %s | %s",
-                          c.base_symbol, early_reason, trend_reason)
+                cuts["profile"] += 1
+                if len(sample_reasons["profile"]) < 3:
+                    sample_reasons["profile"].append(
+                        f"{c.base_symbol}:E={early_reason}|T={trend_reason}"
+                    )
                 continue
 
             score, breakdown = _score(c)
@@ -365,10 +386,20 @@ class Screener:
             c.score_breakdown = breakdown
 
             if score < config.min_score_to_alert:
-                log.debug("low score skip %s: %.1f", c.base_symbol, score)
+                cuts["low_score"] += 1
                 continue
 
             candidates.append(c)
+
+        log.info(
+            "scan cuts: no_pairs=%d parse=%d sanity=%d liq_dd=%d profile=%d low_score=%d -> pass=%d",
+            cuts["no_pairs"], cuts["parse_fail"], cuts["sanity"],
+            cuts["liq_drawdown"], cuts["profile"], cuts["low_score"], len(candidates),
+        )
+        if sample_reasons["sanity"]:
+            log.info("sanity samples: %s", " | ".join(sample_reasons["sanity"]))
+        if sample_reasons["profile"]:
+            log.info("profile samples: %s", " | ".join(sample_reasons["profile"]))
 
         candidates.sort(key=lambda x: x.score, reverse=True)
         return candidates
