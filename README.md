@@ -155,6 +155,11 @@ Render Environment'dan oynayabilirsin, kod değişmeden yeniden deploy edilir:
 - `EARLY_MIN_LIQUIDITY=30000`
 - `MAX_TOP10_HOLDER_PCT=20`
 
+**Portföyü korumak için risk limiti (önerilir):**
+- `MAX_OPEN_POSITIONS=3`
+- `MAX_TOTAL_EXPOSURE_SOL=0.03` (örn. her işlem 0.01 SOL ise max 3 açık işlem)
+
+
 **Daha çok sinyal istiyorum (hız):**
 - `MIN_SCORE_TO_ALERT=40`
 - `EARLY_MIN_PRICE_H1=8`

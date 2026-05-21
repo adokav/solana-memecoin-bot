@@ -54,6 +54,25 @@ class Bot:
             await self.tg.info(f"⚠️ ${c.base_symbol} için zaten açık pozisyon var.")
             return
 
+        open_positions = self.store.open_positions()
+        if len(open_positions) >= config.max_open_positions:
+            await self.tg.info(
+                f"⛔ Yeni alım engellendi: açık pozisyon limiti dolu "
+                f"(<code>{len(open_positions)}/{config.max_open_positions}</code>)."
+            )
+            return
+
+        current_exposure = sum(p.sol_spent for p in open_positions)
+        projected_exposure = current_exposure + config.buy_amount_sol
+        if projected_exposure > config.max_total_exposure_sol:
+            await self.tg.info(
+                "⛔ Yeni alım engellendi: toplam risk limiti aşılacak.\n"
+                f"Mevcut: <code>{current_exposure:.4f} SOL</code>\n"
+                f"Yeni sonrası: <code>{projected_exposure:.4f} SOL</code>\n"
+                f"Limit: <code>{config.max_total_exposure_sol:.4f} SOL</code>"
+            )
+            return
+
         log.info("BUY %s amount=%s SOL", c.base_symbol, config.buy_amount_sol)
         try:
             sig, tokens_raw = await self.jup.buy(c.base_token, config.buy_amount_sol)
