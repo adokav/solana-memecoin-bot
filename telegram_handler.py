@@ -3,7 +3,13 @@ import logging
 import time
 from typing import Awaitable, Callable
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -23,6 +29,37 @@ _pending: dict[str, tuple[Candidate, SafetyReport]] = {}
 
 BuyCallback = Callable[[Candidate, SafetyReport], Awaitable[None]]
 _on_buy: BuyCallback | None = None
+
+
+# Telegram menu button'u için (yazma alanının yanındaki ikon)
+BOT_COMMANDS: list[tuple[str, str]] = [
+    ("start", "Karşılama"),
+    ("status", "Açık pozisyonlar + PnL"),
+    ("health", "Bot sağlığı + devre kesici"),
+    ("perf", "Sinyal performansı (1h/24h zirve)"),
+    ("pnl", "Kapanan pozisyon PnL (örn /pnl 7)"),
+    ("paper", "Paper trading raporu"),
+    ("macro", "Son makro snapshot"),
+    ("analog", "Benzer geçmiş makro ortam performansı"),
+    ("halt", "Yeni alımları durdur"),
+    ("resume", "Alımları tekrar serbest bırak"),
+    ("close", "Pozisyonu manuel kapat (örn /close SHIB)"),
+    ("wallets", "Takip edilen smart wallet'ları listele"),
+    ("addwallet", "Smart wallet ekle: /addwallet <adres> [label]"),
+    ("rmwallet", "Smart wallet çıkar: /rmwallet <adres>"),
+]
+
+# Klavyenin üzerinde sabit duran komut buton grid'i
+PERSISTENT_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        ["/status", "/health"],
+        ["/pnl", "/paper"],
+        ["/macro", "/analog"],
+        ["/halt", "/resume"],
+    ],
+    resize_keyboard=True,
+    is_persistent=True,
+)
 
 
 def set_buy_callback(cb: BuyCallback) -> None:
@@ -115,6 +152,9 @@ class TelegramHub:
         self.app.add_handler(CommandHandler("resume", self._resume_cmd))
         self.app.add_handler(CommandHandler("close", self._close_cmd))
         self.app.add_handler(CommandHandler("analog", self._analog_cmd))
+        self.app.add_handler(CommandHandler("wallets", self._wallets_cmd))
+        self.app.add_handler(CommandHandler("addwallet", self._addwallet_cmd))
+        self.app.add_handler(CommandHandler("rmwallet", self._rmwallet_cmd))
         self.app.add_handler(CallbackQueryHandler(self._on_button))
         self._status_cb: Callable[[], Awaitable[str]] | None = None
         self._health_cb: Callable[[], Awaitable[str]] | None = None
@@ -126,6 +166,9 @@ class TelegramHub:
         self._resume_cb: Callable[[], Awaitable[str]] | None = None
         self._close_cb: Callable[[str], Awaitable[str]] | None = None
         self._analog_cb: Callable[[], Awaitable[str]] | None = None
+        self._wallets_cb: Callable[[], Awaitable[str]] | None = None
+        self._addwallet_cb: Callable[[str, str], Awaitable[str]] | None = None
+        self._rmwallet_cb: Callable[[str], Awaitable[str]] | None = None
         self._chat_id = config.telegram_chat_id
 
     def set_status_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
@@ -158,6 +201,15 @@ class TelegramHub:
     def set_analog_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
         self._analog_cb = cb
 
+    def set_wallets_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
+        self._wallets_cb = cb
+
+    def set_addwallet_callback(self, cb: Callable[[str, str], Awaitable[str]]) -> None:
+        self._addwallet_cb = cb
+
+    def set_rmwallet_callback(self, cb: Callable[[str], Awaitable[str]]) -> None:
+        self._rmwallet_cb = cb
+
     async def _start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
             "🤖 Memecoin Sniper Bot aktif.\n\n"
@@ -171,7 +223,11 @@ class TelegramHub:
             "  /halt [sebep] — yeni alımları durdur\n"
             "  /resume — alımları tekrar serbest bırak\n"
             "  /close &lt;symbol&gt; — açık pozisyonu manuel kapat\n"
-            "  /analog — bugüne benzer geçmiş ortamlarda sinyal performansı"
+            "  /analog — bugüne benzer geçmiş ortamlarda sinyal performansı\n"
+            "  /wallets — smart wallet listesi\n"
+            "  /addwallet &lt;adres&gt; [label] — smart wallet ekle\n"
+            "  /rmwallet &lt;adres&gt; — smart wallet çıkar",
+            reply_markup=PERSISTENT_KEYBOARD,
         )
 
     async def _status_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -229,6 +285,35 @@ class TelegramHub:
         text = await self._analog_cb() if self._analog_cb else "Hazır değil."
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
+    async def _wallets_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        text = await self._wallets_cb() if self._wallets_cb else "Hazır değil."
+        await update.message.reply_text(
+            text, parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+        )
+
+    async def _addwallet_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not ctx.args:
+            await update.message.reply_text(
+                "Kullanım: <code>/addwallet &lt;adres&gt; [label]</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        addr = ctx.args[0].strip()
+        label = " ".join(ctx.args[1:]).strip() if len(ctx.args) > 1 else ""
+        text = await self._addwallet_cb(addr, label) if self._addwallet_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def _rmwallet_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not ctx.args:
+            await update.message.reply_text(
+                "Kullanım: <code>/rmwallet &lt;adres&gt;</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        addr = ctx.args[0].strip()
+        text = await self._rmwallet_cb(addr) if self._rmwallet_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
     async def _on_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         q = update.callback_query
         await q.answer()
@@ -281,17 +366,27 @@ class TelegramHub:
             reply_markup=_keyboard(key),
         )
 
-    async def info(self, text: str) -> None:
-        await self.app.bot.send_message(
-            chat_id=self._chat_id,
-            text=text,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
+    async def info(self, text: str, with_keyboard: bool = False) -> None:
+        kwargs: dict = {
+            "chat_id": self._chat_id,
+            "text": text,
+            "parse_mode": ParseMode.HTML,
+            "disable_web_page_preview": True,
+        }
+        if with_keyboard:
+            kwargs["reply_markup"] = PERSISTENT_KEYBOARD
+        await self.app.bot.send_message(**kwargs)
 
     async def start(self) -> None:
         await self.app.initialize()
         await self.app.start()
+        # Telegram menu butonu — yazma alanının yanındaki komut listesi
+        try:
+            await self.app.bot.set_my_commands(
+                [BotCommand(cmd, desc) for cmd, desc in BOT_COMMANDS]
+            )
+        except Exception:
+            log.exception("set_my_commands failed (non-fatal)")
         await self.app.updater.start_polling(drop_pending_updates=True)
         log.info("telegram started")
 

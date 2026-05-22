@@ -14,6 +14,7 @@ from typing import Literal
 from config import config
 from dexscreener import DexScreener
 from pumpfun import PumpFun
+from smart_wallets import SmartWalletStore
 
 log = logging.getLogger(__name__)
 
@@ -179,7 +180,44 @@ def _check_trend(c: Candidate) -> tuple[bool, str]:
 
 # ---------- 0-100 skor sistemi ----------
 
-def _score(c: Candidate) -> tuple[float, dict]:
+# Profile-aware ağırlıklar: aynı feature early vs trend için farklı önemde.
+# Default ON; PROFILE_AWARE_SCORING=false ile düz hesaplamaya geri dönülür.
+PROFILE_WEIGHTS = {
+    "early": {
+        "momentum": 1.2,       # h1/h6 patlama erken giriş için kritik
+        "vol_liq": 1.1,
+        "buy_pressure": 1.0,
+        "acceleration": 1.3,   # m5 ivmesi yeni başlayan trend göstergesi
+        "social": 0.8,         # yeni tokenlarda sosyal henüz oluşmamış olabilir
+        "age_fit": 1.2,
+        "liq_quality": 0.7,    # FDV/liq erken aşamada genellikle çarpık
+        "holder_health": 1.0,
+        "smart_signal": 1.1,   # erken aşamada smart wallet alımı çok kıymetli
+    },
+    "trend": {
+        "momentum": 0.9,
+        "vol_liq": 1.2,        # sürdürülebilir hacim oturmuş token için kritik
+        "buy_pressure": 1.1,
+        "acceleration": 0.7,   # m5 ivmesi geç aşamada anlamlı değil
+        "social": 1.2,         # oturmuş projeler gerçek sosyal trafiğe sahip
+        "age_fit": 1.0,
+        "liq_quality": 1.3,    # ciddi tokenlar düzgün liq/fdv oranına sahip olmalı
+        "holder_health": 1.0,
+        "smart_signal": 1.0,
+    },
+}
+
+
+def _apply_profile_weights(breakdown: dict, profile: str) -> dict:
+    if not config.profile_aware_scoring:
+        return breakdown
+    weights = PROFILE_WEIGHTS.get(profile)
+    if not weights:
+        return breakdown
+    return {k: round(v * weights.get(k, 1.0), 1) for k, v in breakdown.items()}
+
+
+def _score(c: Candidate, smart_unique_wallets: int = 0) -> tuple[float, dict]:
     breakdown: dict = {}
 
     # Momentum (max 25)
@@ -252,6 +290,18 @@ def _score(c: Candidate) -> tuple[float, dict]:
     # Holder sağlığı placeholder (max 10) - rugcheck.py'de doldurulacak
     breakdown["holder_health"] = 0
 
+    # Smart wallet sinyali (max 25) — en güçlü erken sinyal
+    # 1 wallet = 8, 2 = 16, 3 = 22, 4+ = 25
+    smart_signal = 0.0
+    if smart_unique_wallets >= 1:
+        if smart_unique_wallets >= 4:
+            smart_signal = 25.0
+        else:
+            smart_signal = min(25.0, smart_unique_wallets * 7.5 + 0.5)
+    breakdown["smart_signal"] = round(smart_signal, 1)
+
+    # Profile-aware ağırlıklar (varsa)
+    breakdown = _apply_profile_weights(breakdown, c.profile)
     total = sum(breakdown.values())
     return round(total, 1), breakdown
 
@@ -259,9 +309,15 @@ def _score(c: Candidate) -> tuple[float, dict]:
 # ---------- Ana Screener ----------
 
 class Screener:
-    def __init__(self, ds: DexScreener, pf: PumpFun | None = None) -> None:
+    def __init__(
+        self,
+        ds: DexScreener,
+        pf: PumpFun | None = None,
+        smart: SmartWalletStore | None = None,
+    ) -> None:
         self.ds = ds
         self.pf = pf
+        self.smart = smart
         # {base_token: (last_alerted_ts, score)}  score=0 → red (rug/honeypot), uzun cooldown
         self._cooldown: dict[str, tuple[float, float]] = {}
         # {base_token: [(ts, liquidity_usd), ...]}  son N dakikadaki likidite snapshot'ları
@@ -340,9 +396,23 @@ class Screener:
                 else:
                     sol_tokens.append(addr)
 
+        # Smart wallet kaynağı: N+ smart wallet aynı tokeni alıyorsa scan'e enjekte et
+        src_smart: list[str] = []
+        if self.smart is not None and config.smart_wallets_enabled:
+            src_smart = self.smart.tokens_with_min_buys(config.smart_min_buys_for_inject)
+            for addr in src_smart:
+                if not addr or addr in seen_tokens:
+                    continue
+                seen_tokens.add(addr)
+                if self._on_cooldown(addr):
+                    on_cd += 1
+                else:
+                    sol_tokens.append(addr)
+
         log.info(
-            "scan src: profiles=%d boosted=%d top=%d pump=%d | sol unique=%d | cooldown=%d | to_fetch=%d",
-            len(src_profiles), len(src_latest), len(src_top), len(src_pump),
+            "scan src: profiles=%d boosted=%d top=%d pump=%d smart=%d | sol unique=%d | cooldown=%d | to_fetch=%d",
+            len(src_profiles), len(src_latest), len(src_top),
+            len(src_pump), len(src_smart),
             len(seen_tokens), on_cd, min(len(sol_tokens), 80),
         )
 
@@ -397,7 +467,10 @@ class Screener:
                     )
                 continue
 
-            score, breakdown = _score(c)
+            smart_unique = 0
+            if self.smart is not None and config.smart_wallets_enabled:
+                smart_unique = self.smart.unique_wallets_for(c.base_token)
+            score, breakdown = _score(c, smart_unique_wallets=smart_unique)
             c.score = score
             c.score_breakdown = breakdown
 
