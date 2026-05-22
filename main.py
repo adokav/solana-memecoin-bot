@@ -30,7 +30,9 @@ from sizing import size_for_candidate
 from smart_wallets import (
     SmartWalletStore,
     SmartWalletTracker,
+    WalletOutcomeStore,
     format_wallets_text,
+    update_wallet_stats,
 )
 from storage import Position, Store
 from telegram_handler import TelegramHub, set_buy_callback
@@ -54,9 +56,17 @@ class Bot:
         self.smart_store: SmartWalletStore | None = (
             SmartWalletStore.load() if config.smart_wallets_enabled else None
         )
+        self.outcome_store: WalletOutcomeStore | None = (
+            WalletOutcomeStore.load() if config.smart_wallets_enabled else None
+        )
         self.smart_tracker: SmartWalletTracker | None = (
-            SmartWalletTracker(self.smart_store, self.helius)
-            if self.smart_store is not None and self.helius is not None else None
+            SmartWalletTracker(
+                self.smart_store, self.helius, self.ds, self.outcome_store,
+            )
+            if self.smart_store is not None
+            and self.helius is not None
+            and self.outcome_store is not None
+            else None
         )
         self.jup = Jupiter(kp)
         self.rug = RugCheckClient()
@@ -308,11 +318,14 @@ class Bot:
         smart_line = ""
         if self.smart_store is not None:
             tracked = len(self.smart_store.wallets)
+            active = sum(1 for w in self.smart_store.wallets.values() if not w.disabled)
+            disabled = tracked - active
             self.smart_store.cleanup_recent_buys()
             tokens_seen = len(self.smart_store.recent_buys)
             smart_line = (
-                f"Smart wallet: <code>{tracked}</code> takipte, "
-                f"son {config.smart_buy_window_min}dk içinde "
+                f"Smart wallet: <code>{active}/{tracked}</code> aktif"
+                + (f" (<code>{disabled}</code> disabled)" if disabled else "")
+                + f", son {config.smart_buy_window_min}dk içinde "
                 f"<code>{tokens_seen}</code> token sinyali\n"
             )
         return (
@@ -439,6 +452,54 @@ class Bot:
                     log.exception("smart wallet loop error")
             await asyncio.sleep(config.smart_wallets_poll_interval)
 
+    # ---------- Loop: wallet outcome tracking + quality scoring ----------
+
+    async def wallet_outcomes_loop(self) -> None:
+        await asyncio.sleep(30)
+        while not self._stop.is_set():
+            if self.outcome_store is not None and self.smart_store is not None:
+                try:
+                    updated = 0
+                    finalized = 0
+                    for o in self.outcome_store.pending():
+                        pair = await self.ds.pair("solana", o.pair_address)
+                        if not pair:
+                            continue
+                        try:
+                            price = float(pair.get("priceUsd") or 0)
+                        except (TypeError, ValueError):
+                            price = 0.0
+                        if price > 0 and o.entry_price_usd > 0:
+                            pct = (price - o.entry_price_usd) / o.entry_price_usd * 100
+                            age_h = (time.time() - o.entry_ts) / 3600
+                            if age_h <= 24 and pct > o.peak_pct_24h:
+                                o.peak_pct_24h = pct
+                                o.peak_price_24h = price
+                            if age_h > 24:
+                                o.final_24h = True
+                                finalized += 1
+                            o.last_check_ts = time.time()
+                            updated += 1
+                    if updated:
+                        self.outcome_store.save()
+                    if finalized:
+                        new_disabled = update_wallet_stats(
+                            self.smart_store, self.outcome_store,
+                        )
+                        log.info(
+                            "wallet outcomes: %d updated, %d finalized, %d newly disabled",
+                            updated, finalized, new_disabled,
+                        )
+                        if new_disabled > 0:
+                            await self.tg.info(
+                                f"⚠️ <b>{new_disabled} smart wallet</b> kalite eşiğinin "
+                                f"altına düştüğü için otomatik disable edildi. "
+                                f"Detay için /wallets."
+                            )
+                except Exception:
+                    log.exception("wallet outcomes loop error")
+            await asyncio.sleep(config.wallet_outcomes_interval)
+
     # ---------- Loop: makro snapshot ----------
 
     async def macro_loop(self) -> None:
@@ -544,6 +605,7 @@ class Bot:
             tasks.append(asyncio.create_task(self.macro_loop(), name="macro"))
         if self.smart_tracker is not None:
             tasks.append(asyncio.create_task(self.smart_wallet_loop(), name="smart"))
+            tasks.append(asyncio.create_task(self.wallet_outcomes_loop(), name="wallet_outcomes"))
 
         await self._stop.wait()
         log.info("shutting down...")
