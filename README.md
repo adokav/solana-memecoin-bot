@@ -110,6 +110,8 @@ Diğer parametrelerin hepsi `.env.example`'da default ile geliyor — istersen R
 | `/macro` | Son makro snapshot (SOL, BTC dom, F&G, pump.fun aktivitesi) |
 | `/halt [sebep]` | Yeni alımları durdur (devre kesiciyi manuel aç) |
 | `/resume` | Devre kesiciyi kapat, alımlar tekrar serbest |
+| `/close <symbol>` | Açık pozisyonu manuel kapat |
+| `/analog` | Bugüne benzer geçmiş makro ortamlarda sinyal performansı |
 
 ## Skor Sistemi (max 110)
 
@@ -260,9 +262,28 @@ Greed, pump.fun graduation aktivitesi `data/macro.jsonl`'a yazılır. Tarih
 arşivi birikince gelecekte "bugüne benzer geçmiş günler" analog backtest
 için kullanılır. Şu an sadece arşiv toplar.
 
+## Pyramid / DCA
+
+`PYRAMID_ENABLED=true` ile aktif. TP1 hit olduktan sonra fiyat yeni ATH
+yaparsa pozisyona ekleme yapılır:
+- Tetik: `TP1_TRIGGER_PCT + (n+1) × PYRAMID_TRIGGER_STEP_PCT` (default +60%, +90%)
+- Her ekleme: `BUY_AMOUNT_SOL × PYRAMID_SIZE_RATIO` (default 0.5×)
+- Max `PYRAMID_MAX_ADDS` adet ekleme (default 2)
+- Eklenince blended entry hesaplanır, trailing referansı sıfırlanır
+- Total exposure cap'i hâlâ uygulanır
+
+Paper trading'de de aynı mantık simüle edilir.
+
+## Analog regime backtest
+
+Her sinyal anındaki makro snapshot signal_log'a gömülür. `/analog` komutu
+bugünkü makroya (SOL Δ24h, BTC dom, F&G, pump grad rate) ağırlıklı
+euclidean benzerlik ile en yakın geçmiş sinyalleri bulup ortalama 24h
+zirve performansını raporlar. **En az 5 makro-etiketli finalize sinyal**
+biriktikten sonra anlamlı çalışır (1-2 hafta).
+
 ## TODO
 
-- [ ] Manuel `/close <symbol>` komutu
 - [ ] Birden çok TP seviyesine RugCheck snapshot'ı
-- [ ] Analog backtest motoru (makro snapshot + signal_log üzerinden)
 - [ ] Profile (early/trend) bazlı sizing — şu an sadece skor bucket
+- [ ] Sosyal sinyal entegrasyonu (Twitter mention velocity)

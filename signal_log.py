@@ -34,6 +34,8 @@ class LoggedSignal:
     peak_pct_24h: float = 0.0
     last_check_ts: float = 0.0
     final_24h: bool = False
+    # Sinyal anındaki makro snapshot (analog regime backtest için)
+    macro: dict = field(default_factory=dict)
 
 
 class SignalLog:
@@ -63,6 +65,7 @@ class SignalLog:
         score: float,
         safety_score: float,
         score_breakdown: dict,
+        macro: dict | None = None,
     ) -> None:
         self.signals.append(LoggedSignal(
             ts=time.time(),
@@ -74,6 +77,7 @@ class SignalLog:
             score=score,
             safety_score=safety_score,
             score_breakdown=dict(score_breakdown),
+            macro=dict(macro) if macro else {},
         ))
         self._save()
 

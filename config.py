@@ -197,6 +197,8 @@ class Config:
     # --- Makro snapshot (analog backtest arşivi) ---
     macro_snapshot_enabled: bool = field(default_factory=lambda: _bool("MACRO_SNAPSHOT_ENABLED", True))
     macro_snapshot_interval: int = field(default_factory=lambda: _int("MACRO_SNAPSHOT_INTERVAL", 3600))
+    # /analog raporunda kullanılan en benzer N sinyal
+    analog_top_n: int = field(default_factory=lambda: _int("ANALOG_TOP_N", 20))
 
     # --- Kaynak: pump.fun graduation hook ---
     # Graduate olan token Raydium'a düşer; DexScreener indexlemeden önce yakala

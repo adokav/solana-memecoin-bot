@@ -10,7 +10,9 @@ import asyncio
 import logging
 import signal
 import time
+from dataclasses import asdict
 
+from analog import analog_report
 from circuit_breaker import CircuitBreaker
 from config import config
 from dexscreener import DexScreener
@@ -191,6 +193,11 @@ class Bot:
         ok, msg = await self.monitor.manual_close(arg)
         return ("✅ " if ok else "⚠️ ") + msg
 
+    # ---------- /analog ----------
+
+    async def analog_text(self) -> str:
+        return analog_report(self.signal_log)
+
     # ---------- /status ----------
 
     async def status_text(self) -> str:
@@ -318,6 +325,8 @@ class Bot:
                         asyncio.create_task(self._auto_buy(c, safety))
 
                     if config.signal_tracking_enabled:
+                        macro_now = latest_snapshot()
+                        macro_dict = asdict(macro_now) if macro_now else None
                         self.signal_log.add(
                             token=c.base_token,
                             pair=c.pair_address,
@@ -327,6 +336,7 @@ class Bot:
                             score=c.score,
                             safety_score=safety.score,
                             score_breakdown=c.score_breakdown,
+                            macro=macro_dict,
                         )
                     self._last_alert_ts = time.time()
                     sent += 1
@@ -434,6 +444,7 @@ class Bot:
         self.tg.set_halt_callback(self.halt_text)
         self.tg.set_resume_callback(self.resume_text)
         self.tg.set_close_callback(self.close_text)
+        self.tg.set_analog_callback(self.analog_text)
 
         await self.tg.start()
         await self.tg.info(
@@ -442,7 +453,7 @@ class Bot:
             f"Tarama her {config.scan_interval}s, min skor {config.min_score_to_alert}\n"
             f"Auto-trade: <code>{'AÇIK' if config.auto_trade_enabled else 'kapalı'}</code>  "
             f"Devre kesici: <code>{'açık' if self.breaker.is_open() else 'kapalı'}</code>\n"
-            f"Komutlar: /status /health /perf /pnl /paper /macro /halt /resume /close"
+            f"Komutlar: /status /health /perf /pnl /paper /macro /halt /resume /close /analog"
         )
 
         # Sinyal yakalama (Render restart için graceful shutdown)
