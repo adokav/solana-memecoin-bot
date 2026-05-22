@@ -22,7 +22,7 @@ from config import config
 from dexscreener import DexScreener
 from rugcheck import SafetyReport
 from screener import Candidate
-from storage import Position, TpHit
+from storage import Position, PyramidAdd, TpHit
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +42,10 @@ class PaperStore:
             positions = []
             for p in data.get("positions", []):
                 tp_hits = [TpHit(**h) for h in p.pop("tp_hits", [])]
-                positions.append(Position(tp_hits=tp_hits, **p))
+                pyramid_adds = [PyramidAdd(**a) for a in p.pop("pyramid_adds", [])]
+                positions.append(Position(
+                    tp_hits=tp_hits, pyramid_adds=pyramid_adds, **p,
+                ))
             return cls(positions=positions)
         except (json.JSONDecodeError, TypeError, KeyError) as e:
             log.error("paper store load error: %s", e)
@@ -88,6 +91,7 @@ class PaperStore:
             tx_open="paper",
             profile=c.profile,
             score=c.score + safety.score,
+            original_entry_price_usd=entry_price,
         )
         self.positions.append(pos)
         self.save()
@@ -155,6 +159,59 @@ class PaperMonitor:
             pos.symbol, pnl_pct, reason,
         )
 
+    def _sim_pyramid(self, pos: Position, price: float) -> bool:
+        """Paper karşılığı pyramid add. True dönerse tick'i kıs."""
+        if not config.pyramid_enabled:
+            return False
+        hit = {h.level for h in pos.tp_hits}
+        if 1 not in hit:
+            return False
+        if len(pos.pyramid_adds) >= config.pyramid_max_adds:
+            return False
+        orig = pos.original_entry_price_usd or pos.entry_price_usd
+        if orig <= 0:
+            return False
+        pnl_orig = (price - orig) / orig * 100
+        next_idx = len(pos.pyramid_adds)
+        trigger_pct = config.tp1_trigger + (next_idx + 1) * config.pyramid_trigger_step_pct
+        if pnl_orig < trigger_pct:
+            return False
+
+        add_sol = config.buy_amount_sol * config.pyramid_size_ratio
+        # Paper'da slippage uygula
+        slip_bps = config.buy_slippage_bps
+        eff_price = price * (1 + slip_bps / 10000)
+        tokens_added = int(add_sol * 1_000_000 / max(eff_price, 1e-12))
+        if tokens_added <= 0:
+            return False
+
+        old_basis = pos.amount_raw * pos.entry_price_usd
+        add_basis = tokens_added * eff_price
+        new_amount = pos.amount_raw + tokens_added
+        new_entry = (
+            (old_basis + add_basis) / new_amount if new_amount > 0 else pos.entry_price_usd
+        )
+
+        pos.amount_raw = new_amount
+        pos.remaining_raw += tokens_added
+        pos.sol_spent += add_sol
+        pos.entry_price_usd = new_entry
+        pos.peak_price_usd = price
+        pos.pyramid_adds.append(PyramidAdd(
+            pct_at_add=pnl_orig,
+            price_usd=eff_price,
+            amount_raw=tokens_added,
+            sol_spent=add_sol,
+            tx_sig="paper",
+            ts=time.time(),
+        ))
+        self.store.save()
+        log.info(
+            "PAPER PYRAMID#%d %s +%.0f%% add=%.4f SOL new_entry=$%.8f",
+            len(pos.pyramid_adds), pos.symbol, pnl_orig, add_sol, new_entry,
+        )
+        return True
+
     async def _tick_one(self, pos: Position) -> None:
         if pos.remaining_raw <= 0:
             pos.status = "closed"
@@ -177,6 +234,11 @@ class PaperMonitor:
         pnl_pct = ((price - pos.entry_price_usd) / pos.entry_price_usd) * 100
         drawdown = ((pos.peak_price_usd - price) / pos.peak_price_usd) * 100
         hit = {h.level for h in pos.tp_hits}
+
+        # Pyramid (TP1 sonrası, TP3 öncesi)
+        if 1 in hit and 3 not in hit:
+            if self._sim_pyramid(pos, price):
+                return
 
         if 3 not in hit and pnl_pct >= config.tp3_trigger:
             self._partial_sell(pos, 3, config.tp3_trigger, config.tp3_sell, price)

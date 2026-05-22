@@ -74,11 +74,14 @@ def _stats(positions: list[Position]) -> TradeStats | None:
     )
 
 
-def _bucket_label(score: float) -> str:
+def bucket_label(score: float) -> str:
     for lo, hi, label in SCORE_BUCKETS:
         if lo <= score < hi:
             return label
     return "?"
+
+
+_bucket_label = bucket_label  # geri uyumluluk
 
 
 def _closed(positions: Iterable[Position], since_ts: float) -> list[Position]:

@@ -110,6 +110,8 @@ Diğer parametrelerin hepsi `.env.example`'da default ile geliyor — istersen R
 | `/macro` | Son makro snapshot (SOL, BTC dom, F&G, pump.fun aktivitesi) |
 | `/halt [sebep]` | Yeni alımları durdur (devre kesiciyi manuel aç) |
 | `/resume` | Devre kesiciyi kapat, alımlar tekrar serbest |
+| `/close <symbol>` | Açık pozisyonu manuel kapat |
+| `/analog` | Bugüne benzer geçmiş makro ortamlarda sinyal performansı |
 
 ## Skor Sistemi (max 110)
 
@@ -199,7 +201,7 @@ render.yaml         — Render blueprint
 - **Sürekli "RUG SKIP"** → RugCheck filtrelerin sıkı, `REQUIRE_LP_LOCKED=false` ile test et
 - **Hiç aday gelmiyor** → `MIN_SCORE_TO_ALERT=30`'a düşür, filtre eşiklerini gevşet
 
-## Yürütme kalitesi (Jupiter)
+## Yürütme kalitesi (Jupiter + Jito)
 
 | Env | Default | Açıklama |
 |-----|---------|----------|
@@ -209,6 +211,19 @@ render.yaml         — Render blueprint
 | `DYNAMIC_SLIPPAGE_MAX_BPS` | `1500` | Dynamic slippage tavan |
 | `BUY_SLIPPAGE_BPS` | `500` | Alımda sabit slippage tavanı |
 | `SELL_SLIPPAGE_BPS` | `700` | Satışta sabit slippage tavanı |
+| `JITO_ENABLED` | `false` | Jito bundle yolu (priority fee yarışını bypass) |
+| `JITO_TIP_LAMPORTS` | `100000` | Bundle tip miktarı (~$0.02). Daha yüksek = daha öncelikli |
+| `JITO_BLOCK_ENGINE_URL` | `mainnet.block-engine.jito.wtf` | Block engine endpoint |
+
+## Adaptive position sizing
+
+Default kapalı (`ADAPTIVE_SIZING_ENABLED=false`). Açıldığında paper PnL'inden
+her skor bucket'ı (55-65, 65-75, 75-85, 85+) için bir çarpan hesaplar:
+ortalama PnL %≤0 → 0.5×, %30+ → 1.5×, %80+ → 2.0×. Yetersiz örnek (default
+5'ten az) varsa flat (1.0×) kalır. `BUY_AMOUNT_SOL × multiplier` ile alır.
+
+**Açma şartı:** `/paper 14` veya `/paper 30` çıktısında her bucket'ta en az
+`ADAPTIVE_SIZING_MIN_SAMPLES` (5) örnek görünmeli — yoksa körlemesine çarpan.
 
 ## Kaynaklar (KATMAN 1)
 
@@ -247,10 +262,28 @@ Greed, pump.fun graduation aktivitesi `data/macro.jsonl`'a yazılır. Tarih
 arşivi birikince gelecekte "bugüne benzer geçmiş günler" analog backtest
 için kullanılır. Şu an sadece arşiv toplar.
 
+## Pyramid / DCA
+
+`PYRAMID_ENABLED=true` ile aktif. TP1 hit olduktan sonra fiyat yeni ATH
+yaparsa pozisyona ekleme yapılır:
+- Tetik: `TP1_TRIGGER_PCT + (n+1) × PYRAMID_TRIGGER_STEP_PCT` (default +60%, +90%)
+- Her ekleme: `BUY_AMOUNT_SOL × PYRAMID_SIZE_RATIO` (default 0.5×)
+- Max `PYRAMID_MAX_ADDS` adet ekleme (default 2)
+- Eklenince blended entry hesaplanır, trailing referansı sıfırlanır
+- Total exposure cap'i hâlâ uygulanır
+
+Paper trading'de de aynı mantık simüle edilir.
+
+## Analog regime backtest
+
+Her sinyal anındaki makro snapshot signal_log'a gömülür. `/analog` komutu
+bugünkü makroya (SOL Δ24h, BTC dom, F&G, pump grad rate) ağırlıklı
+euclidean benzerlik ile en yakın geçmiş sinyalleri bulup ortalama 24h
+zirve performansını raporlar. **En az 5 makro-etiketli finalize sinyal**
+biriktikten sonra anlamlı çalışır (1-2 hafta).
+
 ## TODO
 
-- [ ] Manuel `/close <symbol>` komutu
 - [ ] Birden çok TP seviyesine RugCheck snapshot'ı
-- [ ] Pozisyon büyüklüğü skor/profile'a göre ölçeklendirme (Kelly-lite)
-- [ ] Jito bundle desteği (priority fee bid race için)
-- [ ] Analog backtest motoru (makro snapshot + signal_log üzerinden)
+- [ ] Profile (early/trend) bazlı sizing — şu an sadece skor bucket
+- [ ] Sosyal sinyal entegrasyonu (Twitter mention velocity)

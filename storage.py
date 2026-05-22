@@ -24,15 +24,25 @@ class TpHit:
 
 
 @dataclass
+class PyramidAdd:
+    pct_at_add: float    # orijinal entry'e göre fiyat değişim % (add anında)
+    price_usd: float
+    amount_raw: int
+    sol_spent: float
+    tx_sig: str
+    ts: float
+
+
+@dataclass
 class Position:
     pair_address: str
     base_token: str
     symbol: str
-    entry_price_usd: float
+    entry_price_usd: float           # blended ortalama (add'lerden sonra güncellenir)
     peak_price_usd: float
-    amount_raw: int          # alımda alınan toplam token (raw)
+    amount_raw: int          # alımda alınan toplam token (raw) — add ile artar
     remaining_raw: int       # kademeli satışlardan sonra kalan
-    sol_spent: float
+    sol_spent: float         # toplam harcanan SOL (add'ler dahil)
     sol_received_total: float = 0.0  # şu ana kadar kapatılan kısmın geliri
     opened_at: float = 0.0
     tx_open: str = ""
@@ -44,6 +54,9 @@ class Position:
     closed_at: Optional[float] = None
     pnl_pct: Optional[float] = None
     close_reason: Optional[str] = None
+    # Pyramid / DCA — opsiyonel, eski pozisyonlarda yok
+    original_entry_price_usd: Optional[float] = None  # add tetiği için referans
+    pyramid_adds: list[PyramidAdd] = field(default_factory=list)
 
 
 @dataclass
@@ -59,7 +72,10 @@ class Store:
             positions = []
             for p in data.get("positions", []):
                 tp_hits = [TpHit(**h) for h in p.pop("tp_hits", [])]
-                positions.append(Position(tp_hits=tp_hits, **p))
+                pyramid_adds = [PyramidAdd(**a) for a in p.pop("pyramid_adds", [])]
+                positions.append(Position(
+                    tp_hits=tp_hits, pyramid_adds=pyramid_adds, **p,
+                ))
             return cls(positions=positions)
         except (json.JSONDecodeError, TypeError, KeyError) as e:
             log.error("storage load error: %s", e)

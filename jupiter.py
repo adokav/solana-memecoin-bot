@@ -16,6 +16,7 @@ from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 
 from config import config
+from jito import JitoClient, JitoError
 
 log = logging.getLogger(__name__)
 
@@ -34,10 +35,15 @@ class Jupiter:
         self.kp = keypair
         self.rpc = AsyncClient(config.rpc_url, commitment=Confirmed)
         self._http = httpx.AsyncClient(timeout=30.0)
+        self.jito: JitoClient | None = (
+            JitoClient(config.jito_block_engine_url) if config.jito_enabled else None
+        )
 
     async def close(self) -> None:
         await self.rpc.close()
         await self._http.aclose()
+        if self.jito is not None:
+            await self.jito.close()
 
     # ---------- Quote ----------
 
@@ -137,12 +143,55 @@ class Jupiter:
         unsigned = VersionedTransaction.from_bytes(raw)
         signed = VersionedTransaction(unsigned.message, [self.kp])
 
+        # Jito path: bundle swap + tip ile validator sıralamasını bypass et
+        if self.jito is not None:
+            jito_sig = await self._try_jito_send(signed)
+            if jito_sig is not None:
+                return jito_sig
+
+        # Direkt RPC (fallback veya Jito kapalıysa default)
         opts = TxOpts(skip_preflight=True, preflight_commitment=Confirmed, max_retries=3)
         resp = await self.rpc.send_raw_transaction(bytes(signed), opts=opts)
         sig = str(resp.value)
-        log.info("tx sent: %s", sig)
+        log.info("tx sent (rpc): %s", sig)
         await self.rpc.confirm_transaction(resp.value, commitment=Confirmed)
         return sig
+
+    async def _try_jito_send(self, signed_swap: VersionedTransaction) -> str | None:
+        """Bundle başarılıysa swap signature döner, değilse None (RPC fallback)."""
+        if self.jito is None:
+            return None
+        try:
+            if not await self.jito.ensure_tip_accounts():
+                log.warning("jito tip accounts unavailable, falling back to RPC")
+                return None
+            tip_account = self.jito.random_tip_account()
+            if tip_account is None:
+                return None
+
+            recent_bh = signed_swap.message.recent_blockhash
+            tip_tx = self.jito.build_tip_tx(
+                self.kp,
+                config.jito_tip_lamports,
+                recent_bh,
+                tip_account,
+            )
+
+            swap_b64 = base64.b64encode(bytes(signed_swap)).decode()
+            tip_b64 = base64.b64encode(bytes(tip_tx)).decode()
+            bundle_id = await self.jito.send_bundle([swap_b64, tip_b64])
+
+            sig_obj = signed_swap.signatures[0]
+            sig_str = str(sig_obj)
+            log.info("jito bundle sent: %s | swap sig: %s", bundle_id, sig_str)
+            await self.rpc.confirm_transaction(sig_obj, commitment=Confirmed)
+            return sig_str
+        except JitoError as e:
+            log.warning("jito bundle failed (%s), falling back to RPC", e)
+            return None
+        except Exception:
+            log.exception("jito bundle unexpected error, falling back to RPC")
+            return None
 
     # ---------- High level ----------
 
