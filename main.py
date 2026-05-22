@@ -23,6 +23,7 @@ from pumpfun import PumpFun
 from rugcheck import RugCheckClient, SafetyReport
 from screener import Candidate, Screener
 from signal_log import SignalLog
+from sizing import size_for_candidate
 from storage import Position, Store
 from telegram_handler import TelegramHub, set_buy_callback
 from wallet import load_keypair
@@ -87,8 +88,20 @@ class Bot:
             )
             return
 
+        # Adaptive sizing: paper verisinden skor bucket çarpanı (kapalıysa flat)
+        paper_positions = self.paper_store.positions if self.paper_store else None
+        buy_amount, size_note = size_for_candidate(
+            c.score + safety.score, paper_positions, config.buy_amount_sol,
+        )
+        if buy_amount <= 0:
+            await self.tg.info(
+                f"⏭ <b>${c.base_symbol}</b> pas — adaptive size 0\n"
+                f"<i>{size_note}</i>"
+            )
+            return
+
         current_exposure = sum(p.sol_spent for p in open_positions)
-        projected_exposure = current_exposure + config.buy_amount_sol
+        projected_exposure = current_exposure + buy_amount
         if projected_exposure > config.max_total_exposure_sol:
             await self.tg.info(
                 "⛔ Yeni alım engellendi: toplam risk limiti aşılacak.\n"
@@ -98,9 +111,9 @@ class Bot:
             )
             return
 
-        log.info("BUY %s amount=%s SOL", c.base_symbol, config.buy_amount_sol)
+        log.info("BUY %s amount=%.4f SOL (%s)", c.base_symbol, buy_amount, size_note)
         try:
-            sig, tokens_raw = await self.jup.buy(c.base_token, config.buy_amount_sol)
+            sig, tokens_raw = await self.jup.buy(c.base_token, buy_amount)
         except Exception as e:
             log.exception("buy failed")
             await self.tg.info(f"❌ Alım hatası ${c.base_symbol}: <code>{e}</code>")
@@ -114,7 +127,7 @@ class Bot:
             peak_price_usd=c.price_usd,
             amount_raw=tokens_raw,
             remaining_raw=tokens_raw,
-            sol_spent=config.buy_amount_sol,
+            sol_spent=buy_amount,
             opened_at=time.time(),
             tx_open=sig,
             profile=c.profile,
@@ -125,7 +138,7 @@ class Bot:
         await self.tg.info(
             f"✅ <b>${c.base_symbol}</b> ALINDI!\n"
             f"Giriş: <code>${c.price_usd:.8f}</code>\n"
-            f"Harcanan: <code>{config.buy_amount_sol} SOL</code>\n\n"
+            f"Harcanan: <code>{buy_amount:.4f} SOL</code>  <i>({size_note})</i>\n\n"
             f"<b>Kademeli çıkış planı:</b>\n"
             f"• TP1 +{config.tp1_trigger:.0f}% → kalanın %{config.tp1_sell:.0f}'i\n"
             f"• TP2 +{config.tp2_trigger:.0f}% → kalanın %{config.tp2_sell:.0f}'i\n"

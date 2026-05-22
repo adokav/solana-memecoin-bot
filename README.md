@@ -199,7 +199,7 @@ render.yaml         — Render blueprint
 - **Sürekli "RUG SKIP"** → RugCheck filtrelerin sıkı, `REQUIRE_LP_LOCKED=false` ile test et
 - **Hiç aday gelmiyor** → `MIN_SCORE_TO_ALERT=30`'a düşür, filtre eşiklerini gevşet
 
-## Yürütme kalitesi (Jupiter)
+## Yürütme kalitesi (Jupiter + Jito)
 
 | Env | Default | Açıklama |
 |-----|---------|----------|
@@ -209,6 +209,19 @@ render.yaml         — Render blueprint
 | `DYNAMIC_SLIPPAGE_MAX_BPS` | `1500` | Dynamic slippage tavan |
 | `BUY_SLIPPAGE_BPS` | `500` | Alımda sabit slippage tavanı |
 | `SELL_SLIPPAGE_BPS` | `700` | Satışta sabit slippage tavanı |
+| `JITO_ENABLED` | `false` | Jito bundle yolu (priority fee yarışını bypass) |
+| `JITO_TIP_LAMPORTS` | `100000` | Bundle tip miktarı (~$0.02). Daha yüksek = daha öncelikli |
+| `JITO_BLOCK_ENGINE_URL` | `mainnet.block-engine.jito.wtf` | Block engine endpoint |
+
+## Adaptive position sizing
+
+Default kapalı (`ADAPTIVE_SIZING_ENABLED=false`). Açıldığında paper PnL'inden
+her skor bucket'ı (55-65, 65-75, 75-85, 85+) için bir çarpan hesaplar:
+ortalama PnL %≤0 → 0.5×, %30+ → 1.5×, %80+ → 2.0×. Yetersiz örnek (default
+5'ten az) varsa flat (1.0×) kalır. `BUY_AMOUNT_SOL × multiplier` ile alır.
+
+**Açma şartı:** `/paper 14` veya `/paper 30` çıktısında her bucket'ta en az
+`ADAPTIVE_SIZING_MIN_SAMPLES` (5) örnek görünmeli — yoksa körlemesine çarpan.
 
 ## Kaynaklar (KATMAN 1)
 
@@ -251,6 +264,5 @@ için kullanılır. Şu an sadece arşiv toplar.
 
 - [ ] Manuel `/close <symbol>` komutu
 - [ ] Birden çok TP seviyesine RugCheck snapshot'ı
-- [ ] Pozisyon büyüklüğü skor/profile'a göre ölçeklendirme (Kelly-lite)
-- [ ] Jito bundle desteği (priority fee bid race için)
 - [ ] Analog backtest motoru (makro snapshot + signal_log üzerinden)
+- [ ] Profile (early/trend) bazlı sizing — şu an sadece skor bucket
