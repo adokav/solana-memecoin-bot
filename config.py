@@ -182,6 +182,15 @@ class Config:
     adaptive_sizing_enabled: bool = field(default_factory=lambda: _bool("ADAPTIVE_SIZING_ENABLED", False))
     adaptive_sizing_min_samples: int = field(default_factory=lambda: _int("ADAPTIVE_SIZING_MIN_SAMPLES", 5))
 
+    # --- Pyramid / DCA (TP1 sonrası kazanan trende ekleme) ---
+    # Default kapalı — riskli, paper'da kazanan strateji görüldükten sonra aç
+    pyramid_enabled: bool = field(default_factory=lambda: _bool("PYRAMID_ENABLED", False))
+    pyramid_max_adds: int = field(default_factory=lambda: _int("PYRAMID_MAX_ADDS", 2))
+    # TP1 trigger'ından sonra her +N% adımında bir add tetiklenir
+    pyramid_trigger_step_pct: float = field(default_factory=lambda: _float("PYRAMID_TRIGGER_STEP_PCT", 30))
+    # Her add miktarı = BUY_AMOUNT_SOL × bu oran
+    pyramid_size_ratio: float = field(default_factory=lambda: _float("PYRAMID_SIZE_RATIO", 0.5))
+
     # --- Paper trading (gerçek para riskine girmeden veri biriktir) ---
     paper_trading_enabled: bool = field(default_factory=lambda: _bool("PAPER_TRADING_ENABLED", True))
 

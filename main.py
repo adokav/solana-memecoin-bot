@@ -132,6 +132,7 @@ class Bot:
             tx_open=sig,
             profile=c.profile,
             score=c.score + safety.score,
+            original_entry_price_usd=c.price_usd,
         )
         self.store.add(pos)
 

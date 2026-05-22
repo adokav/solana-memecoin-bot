@@ -14,7 +14,7 @@ import time
 from config import config
 from dexscreener import DexScreener
 from jupiter import Jupiter, JupiterError, LAMPORTS_PER_SOL
-from storage import Position, Store, TpHit
+from storage import Position, PyramidAdd, Store, TpHit
 from telegram_handler import TelegramHub
 
 log = logging.getLogger(__name__)
@@ -126,6 +126,84 @@ class Monitor:
             f"<a href=\"https://solscan.io/tx/{sig}\">solscan</a>"
         )
 
+    # ---------- Pyramid / DCA: TP1 sonrası kazanan trende ekle ----------
+
+    async def _try_pyramid(self, pos: Position, price: float) -> bool:
+        """True dönerse bu tick için başka aksiyon alma."""
+        if not config.pyramid_enabled:
+            return False
+        # Sadece TP1 sonrası (en az bir miktar kar realize edildi)
+        hit_levels = {h.level for h in pos.tp_hits}
+        if 1 not in hit_levels:
+            return False
+        if len(pos.pyramid_adds) >= config.pyramid_max_adds:
+            return False
+
+        orig = pos.original_entry_price_usd or pos.entry_price_usd
+        if orig <= 0:
+            return False
+        pnl_from_orig = (price - orig) / orig * 100
+
+        # Sıradaki add tetiği: TP1 trigger + (add_idx+1) × step
+        next_idx = len(pos.pyramid_adds)
+        trigger_pct = config.tp1_trigger + (next_idx + 1) * config.pyramid_trigger_step_pct
+        if pnl_from_orig < trigger_pct:
+            return False
+
+        add_sol = config.buy_amount_sol * config.pyramid_size_ratio
+        # Exposure cap: yine de toplam riski koru
+        current_exposure = sum(p.sol_spent for p in self.store.open_positions())
+        if current_exposure + add_sol > config.max_total_exposure_sol:
+            log.info("pyramid skip %s: exposure cap", pos.symbol)
+            return False
+
+        try:
+            sig, tokens_bought = await self.jup.buy(pos.base_token, add_sol)
+        except JupiterError as e:
+            await self.tg.info(
+                f"⚠️ Pyramid ekleme başarısız ${pos.symbol}: <code>{e}</code>"
+            )
+            return False
+        except Exception as e:
+            log.exception("pyramid buy failed")
+            await self.tg.info(
+                f"❌ Pyramid hatası ${pos.symbol}: <code>{e}</code>"
+            )
+            return False
+
+        # Blended entry: (eski USD bazis + yeni USD bazis) / yeni token toplamı
+        old_basis = pos.amount_raw * pos.entry_price_usd
+        add_basis = tokens_bought * price
+        new_amount = pos.amount_raw + tokens_bought
+        new_entry = (
+            (old_basis + add_basis) / new_amount if new_amount > 0 else pos.entry_price_usd
+        )
+
+        pos.amount_raw = new_amount
+        pos.remaining_raw += tokens_bought
+        pos.sol_spent += add_sol
+        pos.entry_price_usd = new_entry
+        pos.peak_price_usd = price  # trailing referansı sıfırlansın
+        pos.pyramid_adds.append(PyramidAdd(
+            pct_at_add=pnl_from_orig,
+            price_usd=price,
+            amount_raw=tokens_bought,
+            sol_spent=add_sol,
+            tx_sig=sig,
+            ts=time.time(),
+        ))
+        self.store.update()
+
+        await self.tg.info(
+            f"➕ <b>Pyramid #{len(pos.pyramid_adds)}</b> ${pos.symbol}  "
+            f"<code>+{pnl_from_orig:.0f}%</code> (orig)\n"
+            f"Eklenen: <code>{add_sol:.4f} SOL</code> @ <code>${price:.8f}</code>\n"
+            f"Yeni blended entry: <code>${new_entry:.8f}</code>\n"
+            f"Toplam harcanan: <code>{pos.sol_spent:.4f} SOL</code>\n"
+            f"<a href=\"https://solscan.io/tx/{sig}\">solscan</a>"
+        )
+        return True
+
     # ---------- Tek bir pozisyon için tick ----------
 
     async def _tick_one(self, pos: Position) -> None:
@@ -154,6 +232,11 @@ class Monitor:
         drawdown_from_peak = ((pos.peak_price_usd - price) / pos.peak_price_usd) * 100
 
         hit_levels = {h.level for h in pos.tp_hits}
+
+        # --- Pyramid (TP1 sonrası, TP3 öncesi) ---
+        if 1 in hit_levels and 3 not in hit_levels:
+            if await self._try_pyramid(pos, price):
+                return
 
         # --- TP3 ---
         if 3 not in hit_levels and pnl_pct >= config.tp3_trigger:
