@@ -106,6 +106,10 @@ Diğer parametrelerin hepsi `.env.example`'da default ile geliyor — istersen R
 | `/health` | Son tarama, açık pozisyon sayısı |
 | `/perf` | Sinyal performansı (alert'ten sonra 1h/24h zirve) |
 | `/pnl [gün]` | Kapanan pozisyon raporu (profile/skor/sebep bazlı) |
+| `/paper [gün]` | Paper trading raporu (her alert sanal pozisyon olarak açılır) |
+| `/macro` | Son makro snapshot (SOL, BTC dom, F&G, pump.fun aktivitesi) |
+| `/halt [sebep]` | Yeni alımları durdur (devre kesiciyi manuel aç) |
+| `/resume` | Devre kesiciyi kapat, alımlar tekrar serbest |
 
 ## Skor Sistemi (max 110)
 
@@ -212,9 +216,41 @@ render.yaml         — Render blueprint
 - Pump.fun graduation hook: bonding curve tamamlanan tokenlar (Raydium'a geçer geçmez)
   - `PUMPFUN_ENABLED=true` (default), `PUMPFUN_FETCH_LIMIT=30`
 
+## Auto-trade & devre kesici
+
+**Auto-trade** (default kapalı — `AUTO_TRADE_ENABLED=true` ile aç):
+Bir aday `AUTO_TRADE_MIN_SCORE` (85) eşiğini geçer, `AUTO_TRADE_MIN_SAFETY_SCORE`
+(8/10) güvenlik puanını alır ve honeypot impact'i `AUTO_TRADE_MAX_PRICE_IMPACT`
+(%2) altında ise Telegram tap'i beklemeden otomatik alır. Eşik altı sinyaller
+yine manuel onay ile gelir. Aktif etmeden önce 1 hafta paper data toplayıp
+edge görmek önerilir.
+
+**Devre kesici** (her zaman aktif):
+- Günlük kayıp `DAILY_LOSS_STOP_SOL` (0.05) limitini aşarsa gün sonuna kadar
+  yeni alım yok.
+- `MAX_CONSECUTIVE_LOSSES` (5) ardışık kayıp → manuel `/resume`'a kadar durur.
+- Manuel `/halt [sebep]` ile istediğin an durdurulur.
+- Durum `data/circuit_breaker.json`'da, restart sonrası devam eder.
+
+## Paper trading & makro snapshot
+
+**Paper trading** (default açık, `PAPER_TRADING_ENABLED=false` ile kapatılır):
+Her alert için DexScreener fiyatından sanal pozisyon açılır, real monitor
+ile aynı TP/SL/trailing/breakeven mantığıyla kapatılır. Slippage muhafazakar
+tahmin için bilerek yüksek tutulur. Sonuç `data/paper_positions.json`'da,
+`/paper` ile raporlanır. Gerçek para riski yok — bot'un kendi stratejisinin
+**gerçek** performans verisi 1-2 haftada birikir.
+
+**Makro snapshot** (default açık, `MACRO_SNAPSHOT_ENABLED=false` ile kapatılır):
+Saatte bir SOL fiyat/24h değişim, BTC dominance, toplam piyasa cap, Fear &
+Greed, pump.fun graduation aktivitesi `data/macro.jsonl`'a yazılır. Tarih
+arşivi birikince gelecekte "bugüne benzer geçmiş günler" analog backtest
+için kullanılır. Şu an sadece arşiv toplar.
+
 ## TODO
 
 - [ ] Manuel `/close <symbol>` komutu
 - [ ] Birden çok TP seviyesine RugCheck snapshot'ı
 - [ ] Pozisyon büyüklüğü skor/profile'a göre ölçeklendirme (Kelly-lite)
 - [ ] Jito bundle desteği (priority fee bid race için)
+- [ ] Analog backtest motoru (makro snapshot + signal_log üzerinden)

@@ -11,10 +11,13 @@ import logging
 import signal
 import time
 
+from circuit_breaker import CircuitBreaker
 from config import config
 from dexscreener import DexScreener
 from jupiter import Jupiter, LAMPORTS_PER_SOL
+from macro import MacroCollector, append_snapshot, format_snapshot, latest_snapshot
 from monitor import Monitor
+from paper import PaperMonitor, PaperStore
 from pnl import format_report, summarize
 from pumpfun import PumpFun
 from rugcheck import RugCheckClient, SafetyReport
@@ -43,6 +46,13 @@ class Bot:
         self.screener = Screener(self.ds, self.pf)
         self.signal_log = SignalLog()
         self.monitor = Monitor(self.ds, self.jup, self.store, self.tg)
+        self.paper_store = PaperStore.load() if config.paper_trading_enabled else None
+        self.paper_monitor = (
+            PaperMonitor(self.ds, self.paper_store)
+            if self.paper_store is not None else None
+        )
+        self.macro = MacroCollector(self.pf) if config.macro_snapshot_enabled else None
+        self.breaker = CircuitBreaker()
         self._stop = asyncio.Event()
         self._last_scan_ts: float = 0
         self._last_scan_count: int = 0
@@ -55,6 +65,18 @@ class Bot:
     async def on_buy(self, c: Candidate, safety: SafetyReport) -> None:
         if self.store.find_by_pair(c.pair_address):
             await self.tg.info(f"⚠️ ${c.base_symbol} için zaten açık pozisyon var.")
+            return
+
+        # Devre kesici: önceden açıksa veya post-trade check yeni tetiklerse iptal
+        if self.breaker.is_open():
+            await self.tg.info(
+                f"⛔ Alım iptal — devre kesici açık.\n"
+                f"Sebep: <code>{self.breaker.state.reason}</code>"
+            )
+            return
+        halted_now, reason = self.breaker.check_post_close(self.store.positions)
+        if halted_now:
+            await self.tg.info(f"⛔ Devre kesici tetiklendi: <code>{reason}</code>")
             return
 
         open_positions = self.store.open_positions()
@@ -113,6 +135,42 @@ class Bot:
             f"<a href=\"https://solscan.io/tx/{sig}\">solscan</a>"
         )
 
+    # ---------- Auto-trade helpers ----------
+
+    def _auto_eligible(self, c: Candidate, safety: SafetyReport, impact: float) -> bool:
+        if not config.auto_trade_enabled:
+            return False
+        total = c.score + safety.score
+        if total < config.auto_trade_min_score:
+            return False
+        if safety.score < config.auto_trade_min_safety_score:
+            return False
+        if impact > config.auto_trade_max_price_impact:
+            return False
+        if self.breaker.is_open():
+            return False
+        return True
+
+    async def _auto_buy(self, c: Candidate, safety: SafetyReport) -> None:
+        try:
+            await self.tg.info(
+                f"🤖 <b>AUTO-BUY</b> tetiklendi: <b>${c.base_symbol}</b>  "
+                f"<code>skor {c.score + safety.score:.0f}</code>"
+            )
+            await self.on_buy(c, safety)
+        except Exception:
+            log.exception("auto-buy error for %s", c.base_symbol)
+
+    # ---------- /halt /resume ----------
+
+    async def halt_text(self, reason: str) -> str:
+        self.breaker.halt(reason, until_ts=0.0)
+        return self.breaker.status_text(self.store.positions)
+
+    async def resume_text(self) -> str:
+        self.breaker.resume("manual")
+        return self.breaker.status_text(self.store.positions)
+
     # ---------- /status ----------
 
     async def status_text(self) -> str:
@@ -161,10 +219,25 @@ class Bot:
         summary = summarize(self.store.positions, days=days)
         return format_report(summary)
 
+    # ---------- /paper ----------
+
+    async def paper_text(self, days: int) -> str:
+        if self.paper_store is None:
+            return "📭 Paper trading kapalı (PAPER_TRADING_ENABLED=false)."
+        summary = summarize(self.paper_store.positions, days=days)
+        text = format_report(summary)
+        return "🧪 <b>PAPER</b>\n" + text
+
+    # ---------- /macro ----------
+
+    async def macro_text(self) -> str:
+        return format_snapshot(latest_snapshot())
+
     # ---------- /health ----------
 
     async def health_text(self) -> str:
         last_scan_ago = time.time() - self._last_scan_ts if self._last_scan_ts else -1
+        auto = "AÇIK 🤖" if config.auto_trade_enabled else "kapalı"
         return (
             f"💓 <b>Bot sağlığı</b>\n"
             f"Cüzdan: <code>{self.wallet_pubkey[:8]}...{self.wallet_pubkey[-6:]}</code>\n"
@@ -172,7 +245,10 @@ class Bot:
             f"({self._last_scan_count} aday)\n"
             f"Açık pozisyon: <code>{len(self.store.open_positions())}</code>\n"
             f"Tarama: her <code>{config.scan_interval}s</code>\n"
-            f"Pozisyon takip: her <code>{config.monitor_interval}s</code>"
+            f"Pozisyon takip: her <code>{config.monitor_interval}s</code>\n"
+            f"Auto-trade: <code>{auto}</code> "
+            f"(min skor <code>{config.auto_trade_min_score:.0f}</code>)\n\n"
+            f"{self.breaker.status_text(self.store.positions)}"
         )
 
     # ---------- Loop: tarama ----------
@@ -213,6 +289,14 @@ class Bot:
 
                     await self.tg.alert(c, safety)
                     self.screener.mark_alerted(c.base_token, c.score + safety.score)
+                    if self.paper_store is not None:
+                        self.paper_store.open(c, safety, config.buy_amount_sol)
+
+                    # Auto-trade: yüksek güven + safety + düşük impact ise
+                    # Telegram tap'i beklemeden otomatik al
+                    if self._auto_eligible(c, safety, impact):
+                        asyncio.create_task(self._auto_buy(c, safety))
+
                     if config.signal_tracking_enabled:
                         self.signal_log.add(
                             token=c.base_token,
@@ -238,9 +322,48 @@ class Bot:
         while not self._stop.is_set():
             try:
                 await self.monitor.tick()
+                # Pozisyon kapanmış olabilir → devre kesici eşiklerini değerlendir
+                halted_now, reason = self.breaker.check_post_close(self.store.positions)
+                if halted_now:
+                    await self.tg.info(
+                        f"⛔ <b>Devre kesici tetiklendi</b>\n"
+                        f"Sebep: <code>{reason}</code>\n"
+                        f"<i>/resume ile elle açabilirsin.</i>"
+                    )
             except Exception:
                 log.exception("monitor loop error")
             await asyncio.sleep(config.monitor_interval)
+
+    # ---------- Loop: paper trading takibi ----------
+
+    async def paper_monitor_loop(self) -> None:
+        while not self._stop.is_set():
+            if self.paper_monitor is not None:
+                try:
+                    await self.paper_monitor.tick()
+                except Exception:
+                    log.exception("paper monitor loop error")
+            await asyncio.sleep(config.monitor_interval)
+
+    # ---------- Loop: makro snapshot ----------
+
+    async def macro_loop(self) -> None:
+        # İlk snapshot biraz beklesin — diğer init işleri bitsin
+        await asyncio.sleep(15)
+        while not self._stop.is_set():
+            if self.macro is not None:
+                try:
+                    snap = await self.macro.collect()
+                    append_snapshot(snap)
+                    log.info(
+                        "macro: SOL=%.2f (%.1f%%) BTC.D=%.1f F&G=%d pump=%d",
+                        snap.sol_price_usd, snap.sol_change_24h,
+                        snap.btc_dominance, snap.fear_greed,
+                        snap.pump_graduated_recent,
+                    )
+                except Exception:
+                    log.exception("macro loop error")
+            await asyncio.sleep(config.macro_snapshot_interval)
 
     # ---------- Loop: sinyal performans takibi (backtest data) ----------
 
@@ -286,13 +409,19 @@ class Bot:
         self.tg.set_health_callback(self.health_text)
         self.tg.set_perf_callback(self.perf_text)
         self.tg.set_pnl_callback(self.pnl_text)
+        self.tg.set_paper_callback(self.paper_text)
+        self.tg.set_macro_callback(self.macro_text)
+        self.tg.set_halt_callback(self.halt_text)
+        self.tg.set_resume_callback(self.resume_text)
 
         await self.tg.start()
         await self.tg.info(
             f"🤖 <b>Memecoin Sniper başladı</b>\n"
             f"Cüzdan: <code>{self.wallet_pubkey[:8]}...{self.wallet_pubkey[-6:]}</code>\n"
             f"Tarama her {config.scan_interval}s, min skor {config.min_score_to_alert}\n"
-            f"Komutlar: /status /health /perf /pnl"
+            f"Auto-trade: <code>{'AÇIK' if config.auto_trade_enabled else 'kapalı'}</code>  "
+            f"Devre kesici: <code>{'açık' if self.breaker.is_open() else 'kapalı'}</code>\n"
+            f"Komutlar: /status /health /perf /pnl /paper /macro /halt /resume"
         )
 
         # Sinyal yakalama (Render restart için graceful shutdown)
@@ -309,6 +438,10 @@ class Bot:
             asyncio.create_task(self.heartbeat_loop(), name="heartbeat"),
             asyncio.create_task(self.tracking_loop(), name="tracking"),
         ]
+        if self.paper_monitor is not None:
+            tasks.append(asyncio.create_task(self.paper_monitor_loop(), name="paper"))
+        if self.macro is not None:
+            tasks.append(asyncio.create_task(self.macro_loop(), name="macro"))
 
         await self._stop.wait()
         log.info("shutting down...")
@@ -328,6 +461,8 @@ class Bot:
         await self.rug.close()
         if self.pf is not None:
             await self.pf.close()
+        if self.macro is not None:
+            await self.macro.close()
 
 
 def main() -> None:
