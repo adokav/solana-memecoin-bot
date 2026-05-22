@@ -111,6 +111,8 @@ class TelegramHub:
         self.app.add_handler(CommandHandler("pnl", self._pnl_cmd))
         self.app.add_handler(CommandHandler("paper", self._paper_cmd))
         self.app.add_handler(CommandHandler("macro", self._macro_cmd))
+        self.app.add_handler(CommandHandler("halt", self._halt_cmd))
+        self.app.add_handler(CommandHandler("resume", self._resume_cmd))
         self.app.add_handler(CallbackQueryHandler(self._on_button))
         self._status_cb: Callable[[], Awaitable[str]] | None = None
         self._health_cb: Callable[[], Awaitable[str]] | None = None
@@ -118,6 +120,8 @@ class TelegramHub:
         self._pnl_cb: Callable[[int], Awaitable[str]] | None = None
         self._paper_cb: Callable[[int], Awaitable[str]] | None = None
         self._macro_cb: Callable[[], Awaitable[str]] | None = None
+        self._halt_cb: Callable[[str], Awaitable[str]] | None = None
+        self._resume_cb: Callable[[], Awaitable[str]] | None = None
         self._chat_id = config.telegram_chat_id
 
     def set_status_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
@@ -138,6 +142,12 @@ class TelegramHub:
     def set_macro_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
         self._macro_cb = cb
 
+    def set_halt_callback(self, cb: Callable[[str], Awaitable[str]]) -> None:
+        self._halt_cb = cb
+
+    def set_resume_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
+        self._resume_cb = cb
+
     async def _start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
             "🤖 Memecoin Sniper Bot aktif.\n\n"
@@ -147,7 +157,9 @@ class TelegramHub:
             "  /perf — sinyal performans özeti\n"
             "  /pnl [gün] — kapanan pozisyon kâr/zarar raporu\n"
             "  /paper [gün] — paper trading raporu (sanal pozisyonlar)\n"
-            "  /macro — son makro snapshot (SOL, BTC dom, F&amp;G)"
+            "  /macro — son makro snapshot (SOL, BTC dom, F&amp;G)\n"
+            "  /halt [sebep] — yeni alımları durdur\n"
+            "  /resume — alımları tekrar serbest bırak"
         )
 
     async def _status_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -185,6 +197,15 @@ class TelegramHub:
 
     async def _macro_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         text = await self._macro_cb() if self._macro_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def _halt_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        reason = " ".join(ctx.args) if ctx.args else "manual"
+        text = await self._halt_cb(reason) if self._halt_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def _resume_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        text = await self._resume_cb() if self._resume_cb else "Hazır değil."
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def _on_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

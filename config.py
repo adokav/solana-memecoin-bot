@@ -156,6 +156,19 @@ class Config:
     dev_wallet_check_enabled: bool = field(default_factory=lambda: _bool("DEV_WALLET_CHECK_ENABLED", True))
     max_creator_tokens: int = field(default_factory=lambda: _int("MAX_CREATOR_TOKENS", 10))
 
+    # --- Otomatik alım & devre kesici ---
+    # Default kapalı — paper data ile edge doğrulandıktan sonra aç
+    auto_trade_enabled: bool = field(default_factory=lambda: _bool("AUTO_TRADE_ENABLED", False))
+    # Sadece çok yüksek güven sinyallerde tetiklen
+    auto_trade_min_score: float = field(default_factory=lambda: _float("AUTO_TRADE_MIN_SCORE", 85))
+    auto_trade_min_safety_score: float = field(default_factory=lambda: _float("AUTO_TRADE_MIN_SAFETY_SCORE", 8))
+    auto_trade_max_price_impact: float = field(default_factory=lambda: _float("AUTO_TRADE_MAX_PRICE_IMPACT", 2.0))
+
+    # Günlük kayıp tavanı: aşılırsa gün sonuna kadar yeni alım yok
+    daily_loss_stop_sol: float = field(default_factory=lambda: _float("DAILY_LOSS_STOP_SOL", 0.05))
+    # Ardışık N kayıp → manuel /resume'a kadar yeni alım yok
+    max_consecutive_losses: int = field(default_factory=lambda: _int("MAX_CONSECUTIVE_LOSSES", 5))
+
     # --- Paper trading (gerçek para riskine girmeden veri biriktir) ---
     paper_trading_enabled: bool = field(default_factory=lambda: _bool("PAPER_TRADING_ENABLED", True))
 
