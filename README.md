@@ -299,6 +299,24 @@ Cüzdan listesi `data/smart_wallets.json`'da. İlk seed için env:
 `SMART_WALLETS=adres1:label1,adres2:label2`. Canlıda `/addwallet` ve
 `/rmwallet` ile yönetilir; `/wallets` ile listelenir.
 
+### Wallet quality scorer (otomatik temizlik)
+
+Her smart wallet alımı için 24h zirvesi `data/wallet_outcomes.json`'da
+takip edilir. Cüzdan başına quality skoru:
+- avg_peak_24h × 0.5 + 50 (peak komponenti, 0-100 clamp)
+- hit_rate_30 (≥%30 vuran finalize oranı)
+- quality = 0.6 × peak + 0.4 × hit_rate
+
+`WALLET_AUTO_DISABLE_QUALITY` (default 30) altında ve
+`WALLET_AUTO_DISABLE_MIN_SAMPLES` (default 15) finalize sample varsa
+cüzdan otomatik disable edilir:
+- Polling'den çıkartılır (Helius API budget korunur)
+- Screener'ın smart_signal sayısına dahil edilmez
+- `/wallets` listesinde ✗ ile gösterilir
+
+Yeni kalite hesabı her `WALLET_OUTCOMES_INTERVAL` (default 10dk) bir
+çalışır. Disable olduğunda Telegram'a uyarı düşer.
+
 ## Profile-aware scoring
 
 `PROFILE_AWARE_SCORING=true` (default) ile her skor componenti `early` ve

@@ -214,6 +214,12 @@ class Config:
     # Bir tokenı sadece smart wallet alımlarından dolayı scan'e enjekte etmek için min eşik
     smart_min_buys_for_inject: int = field(default_factory=lambda: _int("SMART_MIN_BUYS_FOR_INJECT", 2))
 
+    # Wallet quality scorer
+    wallet_outcomes_interval: int = field(default_factory=lambda: _int("WALLET_OUTCOMES_INTERVAL", 600))
+    # quality < bu eşik VE n >= min_samples → otomatik disable
+    wallet_auto_disable_quality: float = field(default_factory=lambda: _float("WALLET_AUTO_DISABLE_QUALITY", 30))
+    wallet_auto_disable_min_samples: int = field(default_factory=lambda: _int("WALLET_AUTO_DISABLE_MIN_SAMPLES", 15))
+
     # --- Profile-aware scoring ---
     # Skor componentlerini early vs trend için farklı ağırlıklarla ölçeklendir
     profile_aware_scoring: bool = field(default_factory=lambda: _bool("PROFILE_AWARE_SCORING", True))
