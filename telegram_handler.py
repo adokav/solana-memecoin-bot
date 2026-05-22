@@ -109,11 +109,15 @@ class TelegramHub:
         self.app.add_handler(CommandHandler("health", self._health_cmd))
         self.app.add_handler(CommandHandler("perf", self._perf_cmd))
         self.app.add_handler(CommandHandler("pnl", self._pnl_cmd))
+        self.app.add_handler(CommandHandler("paper", self._paper_cmd))
+        self.app.add_handler(CommandHandler("macro", self._macro_cmd))
         self.app.add_handler(CallbackQueryHandler(self._on_button))
         self._status_cb: Callable[[], Awaitable[str]] | None = None
         self._health_cb: Callable[[], Awaitable[str]] | None = None
         self._perf_cb: Callable[[], Awaitable[str]] | None = None
         self._pnl_cb: Callable[[int], Awaitable[str]] | None = None
+        self._paper_cb: Callable[[int], Awaitable[str]] | None = None
+        self._macro_cb: Callable[[], Awaitable[str]] | None = None
         self._chat_id = config.telegram_chat_id
 
     def set_status_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
@@ -128,6 +132,12 @@ class TelegramHub:
     def set_pnl_callback(self, cb: Callable[[int], Awaitable[str]]) -> None:
         self._pnl_cb = cb
 
+    def set_paper_callback(self, cb: Callable[[int], Awaitable[str]]) -> None:
+        self._paper_cb = cb
+
+    def set_macro_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
+        self._macro_cb = cb
+
     async def _start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
             "🤖 Memecoin Sniper Bot aktif.\n\n"
@@ -135,7 +145,9 @@ class TelegramHub:
             "  /status — açık pozisyonlar\n"
             "  /health — bot canlı mı, son tarama\n"
             "  /perf — sinyal performans özeti\n"
-            "  /pnl [gün] — kapanan pozisyon kâr/zarar raporu"
+            "  /pnl [gün] — kapanan pozisyon kâr/zarar raporu\n"
+            "  /paper [gün] — paper trading raporu (sanal pozisyonlar)\n"
+            "  /macro — son makro snapshot (SOL, BTC dom, F&amp;G)"
         )
 
     async def _status_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -159,6 +171,20 @@ class TelegramHub:
             except (ValueError, TypeError):
                 days = 0
         text = await self._pnl_cb(days) if self._pnl_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def _paper_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        days = 0
+        if ctx.args:
+            try:
+                days = max(0, int(ctx.args[0]))
+            except (ValueError, TypeError):
+                days = 0
+        text = await self._paper_cb(days) if self._paper_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def _macro_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        text = await self._macro_cb() if self._macro_cb else "Hazır değil."
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def _on_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

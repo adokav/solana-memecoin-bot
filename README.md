@@ -106,6 +106,8 @@ Diğer parametrelerin hepsi `.env.example`'da default ile geliyor — istersen R
 | `/health` | Son tarama, açık pozisyon sayısı |
 | `/perf` | Sinyal performansı (alert'ten sonra 1h/24h zirve) |
 | `/pnl [gün]` | Kapanan pozisyon raporu (profile/skor/sebep bazlı) |
+| `/paper [gün]` | Paper trading raporu (her alert sanal pozisyon olarak açılır) |
+| `/macro` | Son makro snapshot (SOL, BTC dom, F&G, pump.fun aktivitesi) |
 
 ## Skor Sistemi (max 110)
 
@@ -212,9 +214,25 @@ render.yaml         — Render blueprint
 - Pump.fun graduation hook: bonding curve tamamlanan tokenlar (Raydium'a geçer geçmez)
   - `PUMPFUN_ENABLED=true` (default), `PUMPFUN_FETCH_LIMIT=30`
 
+## Paper trading & makro snapshot
+
+**Paper trading** (default açık, `PAPER_TRADING_ENABLED=false` ile kapatılır):
+Her alert için DexScreener fiyatından sanal pozisyon açılır, real monitor
+ile aynı TP/SL/trailing/breakeven mantığıyla kapatılır. Slippage muhafazakar
+tahmin için bilerek yüksek tutulur. Sonuç `data/paper_positions.json`'da,
+`/paper` ile raporlanır. Gerçek para riski yok — bot'un kendi stratejisinin
+**gerçek** performans verisi 1-2 haftada birikir.
+
+**Makro snapshot** (default açık, `MACRO_SNAPSHOT_ENABLED=false` ile kapatılır):
+Saatte bir SOL fiyat/24h değişim, BTC dominance, toplam piyasa cap, Fear &
+Greed, pump.fun graduation aktivitesi `data/macro.jsonl`'a yazılır. Tarih
+arşivi birikince gelecekte "bugüne benzer geçmiş günler" analog backtest
+için kullanılır. Şu an sadece arşiv toplar.
+
 ## TODO
 
 - [ ] Manuel `/close <symbol>` komutu
 - [ ] Birden çok TP seviyesine RugCheck snapshot'ı
 - [ ] Pozisyon büyüklüğü skor/profile'a göre ölçeklendirme (Kelly-lite)
 - [ ] Jito bundle desteği (priority fee bid race için)
+- [ ] Analog backtest motoru (makro snapshot + signal_log üzerinden)

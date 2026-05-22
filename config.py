@@ -156,6 +156,13 @@ class Config:
     dev_wallet_check_enabled: bool = field(default_factory=lambda: _bool("DEV_WALLET_CHECK_ENABLED", True))
     max_creator_tokens: int = field(default_factory=lambda: _int("MAX_CREATOR_TOKENS", 10))
 
+    # --- Paper trading (gerçek para riskine girmeden veri biriktir) ---
+    paper_trading_enabled: bool = field(default_factory=lambda: _bool("PAPER_TRADING_ENABLED", True))
+
+    # --- Makro snapshot (analog backtest arşivi) ---
+    macro_snapshot_enabled: bool = field(default_factory=lambda: _bool("MACRO_SNAPSHOT_ENABLED", True))
+    macro_snapshot_interval: int = field(default_factory=lambda: _int("MACRO_SNAPSHOT_INTERVAL", 3600))
+
     # --- Kaynak: pump.fun graduation hook ---
     # Graduate olan token Raydium'a düşer; DexScreener indexlemeden önce yakala
     pumpfun_enabled: bool = field(default_factory=lambda: _bool("PUMPFUN_ENABLED", True))

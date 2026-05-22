@@ -14,7 +14,9 @@ import time
 from config import config
 from dexscreener import DexScreener
 from jupiter import Jupiter, LAMPORTS_PER_SOL
+from macro import MacroCollector, append_snapshot, format_snapshot, latest_snapshot
 from monitor import Monitor
+from paper import PaperMonitor, PaperStore
 from pnl import format_report, summarize
 from pumpfun import PumpFun
 from rugcheck import RugCheckClient, SafetyReport
@@ -43,6 +45,12 @@ class Bot:
         self.screener = Screener(self.ds, self.pf)
         self.signal_log = SignalLog()
         self.monitor = Monitor(self.ds, self.jup, self.store, self.tg)
+        self.paper_store = PaperStore.load() if config.paper_trading_enabled else None
+        self.paper_monitor = (
+            PaperMonitor(self.ds, self.paper_store)
+            if self.paper_store is not None else None
+        )
+        self.macro = MacroCollector(self.pf) if config.macro_snapshot_enabled else None
         self._stop = asyncio.Event()
         self._last_scan_ts: float = 0
         self._last_scan_count: int = 0
@@ -161,6 +169,20 @@ class Bot:
         summary = summarize(self.store.positions, days=days)
         return format_report(summary)
 
+    # ---------- /paper ----------
+
+    async def paper_text(self, days: int) -> str:
+        if self.paper_store is None:
+            return "📭 Paper trading kapalı (PAPER_TRADING_ENABLED=false)."
+        summary = summarize(self.paper_store.positions, days=days)
+        text = format_report(summary)
+        return "🧪 <b>PAPER</b>\n" + text
+
+    # ---------- /macro ----------
+
+    async def macro_text(self) -> str:
+        return format_snapshot(latest_snapshot())
+
     # ---------- /health ----------
 
     async def health_text(self) -> str:
@@ -213,6 +235,8 @@ class Bot:
 
                     await self.tg.alert(c, safety)
                     self.screener.mark_alerted(c.base_token, c.score + safety.score)
+                    if self.paper_store is not None:
+                        self.paper_store.open(c, safety, config.buy_amount_sol)
                     if config.signal_tracking_enabled:
                         self.signal_log.add(
                             token=c.base_token,
@@ -241,6 +265,37 @@ class Bot:
             except Exception:
                 log.exception("monitor loop error")
             await asyncio.sleep(config.monitor_interval)
+
+    # ---------- Loop: paper trading takibi ----------
+
+    async def paper_monitor_loop(self) -> None:
+        while not self._stop.is_set():
+            if self.paper_monitor is not None:
+                try:
+                    await self.paper_monitor.tick()
+                except Exception:
+                    log.exception("paper monitor loop error")
+            await asyncio.sleep(config.monitor_interval)
+
+    # ---------- Loop: makro snapshot ----------
+
+    async def macro_loop(self) -> None:
+        # İlk snapshot biraz beklesin — diğer init işleri bitsin
+        await asyncio.sleep(15)
+        while not self._stop.is_set():
+            if self.macro is not None:
+                try:
+                    snap = await self.macro.collect()
+                    append_snapshot(snap)
+                    log.info(
+                        "macro: SOL=%.2f (%.1f%%) BTC.D=%.1f F&G=%d pump=%d",
+                        snap.sol_price_usd, snap.sol_change_24h,
+                        snap.btc_dominance, snap.fear_greed,
+                        snap.pump_graduated_recent,
+                    )
+                except Exception:
+                    log.exception("macro loop error")
+            await asyncio.sleep(config.macro_snapshot_interval)
 
     # ---------- Loop: sinyal performans takibi (backtest data) ----------
 
@@ -286,13 +341,15 @@ class Bot:
         self.tg.set_health_callback(self.health_text)
         self.tg.set_perf_callback(self.perf_text)
         self.tg.set_pnl_callback(self.pnl_text)
+        self.tg.set_paper_callback(self.paper_text)
+        self.tg.set_macro_callback(self.macro_text)
 
         await self.tg.start()
         await self.tg.info(
             f"🤖 <b>Memecoin Sniper başladı</b>\n"
             f"Cüzdan: <code>{self.wallet_pubkey[:8]}...{self.wallet_pubkey[-6:]}</code>\n"
             f"Tarama her {config.scan_interval}s, min skor {config.min_score_to_alert}\n"
-            f"Komutlar: /status /health /perf /pnl"
+            f"Komutlar: /status /health /perf /pnl /paper /macro"
         )
 
         # Sinyal yakalama (Render restart için graceful shutdown)
@@ -309,6 +366,10 @@ class Bot:
             asyncio.create_task(self.heartbeat_loop(), name="heartbeat"),
             asyncio.create_task(self.tracking_loop(), name="tracking"),
         ]
+        if self.paper_monitor is not None:
+            tasks.append(asyncio.create_task(self.paper_monitor_loop(), name="paper"))
+        if self.macro is not None:
+            tasks.append(asyncio.create_task(self.macro_loop(), name="macro"))
 
         await self._stop.wait()
         log.info("shutting down...")
@@ -328,6 +389,8 @@ class Bot:
         await self.rug.close()
         if self.pf is not None:
             await self.pf.close()
+        if self.macro is not None:
+            await self.macro.close()
 
 
 def main() -> None:
