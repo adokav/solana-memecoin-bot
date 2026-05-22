@@ -184,6 +184,12 @@ class Bot:
         self.breaker.resume("manual")
         return self.breaker.status_text(self.store.positions)
 
+    # ---------- /close ----------
+
+    async def close_text(self, arg: str) -> str:
+        ok, msg = await self.monitor.manual_close(arg)
+        return ("✅ " if ok else "⚠️ ") + msg
+
     # ---------- /status ----------
 
     async def status_text(self) -> str:
@@ -426,6 +432,7 @@ class Bot:
         self.tg.set_macro_callback(self.macro_text)
         self.tg.set_halt_callback(self.halt_text)
         self.tg.set_resume_callback(self.resume_text)
+        self.tg.set_close_callback(self.close_text)
 
         await self.tg.start()
         await self.tg.info(
@@ -434,7 +441,7 @@ class Bot:
             f"Tarama her {config.scan_interval}s, min skor {config.min_score_to_alert}\n"
             f"Auto-trade: <code>{'AÇIK' if config.auto_trade_enabled else 'kapalı'}</code>  "
             f"Devre kesici: <code>{'açık' if self.breaker.is_open() else 'kapalı'}</code>\n"
-            f"Komutlar: /status /health /perf /pnl /paper /macro /halt /resume"
+            f"Komutlar: /status /health /perf /pnl /paper /macro /halt /resume /close"
         )
 
         # Sinyal yakalama (Render restart için graceful shutdown)

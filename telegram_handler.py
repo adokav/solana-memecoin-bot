@@ -113,6 +113,7 @@ class TelegramHub:
         self.app.add_handler(CommandHandler("macro", self._macro_cmd))
         self.app.add_handler(CommandHandler("halt", self._halt_cmd))
         self.app.add_handler(CommandHandler("resume", self._resume_cmd))
+        self.app.add_handler(CommandHandler("close", self._close_cmd))
         self.app.add_handler(CallbackQueryHandler(self._on_button))
         self._status_cb: Callable[[], Awaitable[str]] | None = None
         self._health_cb: Callable[[], Awaitable[str]] | None = None
@@ -122,6 +123,7 @@ class TelegramHub:
         self._macro_cb: Callable[[], Awaitable[str]] | None = None
         self._halt_cb: Callable[[str], Awaitable[str]] | None = None
         self._resume_cb: Callable[[], Awaitable[str]] | None = None
+        self._close_cb: Callable[[str], Awaitable[str]] | None = None
         self._chat_id = config.telegram_chat_id
 
     def set_status_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
@@ -148,6 +150,9 @@ class TelegramHub:
     def set_resume_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
         self._resume_cb = cb
 
+    def set_close_callback(self, cb: Callable[[str], Awaitable[str]]) -> None:
+        self._close_cb = cb
+
     async def _start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
             "🤖 Memecoin Sniper Bot aktif.\n\n"
@@ -159,7 +164,8 @@ class TelegramHub:
             "  /paper [gün] — paper trading raporu (sanal pozisyonlar)\n"
             "  /macro — son makro snapshot (SOL, BTC dom, F&amp;G)\n"
             "  /halt [sebep] — yeni alımları durdur\n"
-            "  /resume — alımları tekrar serbest bırak"
+            "  /resume — alımları tekrar serbest bırak\n"
+            "  /close &lt;symbol&gt; — açık pozisyonu manuel kapat"
         )
 
     async def _status_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -206,6 +212,11 @@ class TelegramHub:
 
     async def _resume_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         text = await self._resume_cb() if self._resume_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def _close_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        arg = " ".join(ctx.args) if ctx.args else ""
+        text = await self._close_cb(arg) if self._close_cb else "Hazır değil."
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def _on_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

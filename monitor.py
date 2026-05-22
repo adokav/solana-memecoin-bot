@@ -196,3 +196,24 @@ class Monitor:
                 await self._tick_one(pos)
             except Exception:
                 log.exception("monitor tick error for %s", pos.symbol)
+
+    # ---------- Manuel kapanış (/close komutu için) ----------
+
+    async def manual_close(self, symbol_or_addr: str) -> tuple[bool, str]:
+        """Symbol veya base_token adresi ile eşleşen ilk açık pozisyonu kapatır."""
+        needle = symbol_or_addr.lstrip("$").strip()
+        if not needle:
+            return False, "kullanım: /close &lt;symbol&gt;"
+        needle_up = needle.upper()
+        for pos in self.store.open_positions():
+            if pos.symbol.upper() == needle_up or pos.base_token == needle:
+                pair = await self.ds.pair("solana", pos.pair_address)
+                try:
+                    price = float((pair or {}).get("priceUsd") or 0)
+                except (TypeError, ValueError):
+                    price = 0.0
+                if price <= 0:
+                    price = pos.entry_price_usd
+                await self._close_all(pos, price, "manual /close")
+                return True, f"${pos.symbol} kapatıldı."
+        return False, f"${needle} için açık pozisyon yok."
