@@ -104,6 +104,8 @@ Diğer parametrelerin hepsi `.env.example`'da default ile geliyor — istersen R
 | `/start` | Karşılama |
 | `/status` | Açık pozisyonlar + PnL + TP hits |
 | `/health` | Son tarama, açık pozisyon sayısı |
+| `/perf` | Sinyal performansı (alert'ten sonra 1h/24h zirve) |
+| `/pnl [gün]` | Kapanan pozisyon raporu (profile/skor/sebep bazlı) |
 
 ## Skor Sistemi (max 110)
 
@@ -193,9 +195,26 @@ render.yaml         — Render blueprint
 - **Sürekli "RUG SKIP"** → RugCheck filtrelerin sıkı, `REQUIRE_LP_LOCKED=false` ile test et
 - **Hiç aday gelmiyor** → `MIN_SCORE_TO_ALERT=30`'a düşür, filtre eşiklerini gevşet
 
+## Yürütme kalitesi (Jupiter)
+
+| Env | Default | Açıklama |
+|-----|---------|----------|
+| `PRIORITY_FEE_LEVEL` | `veryHigh` | Jupiter priority fee seviyesi (`medium`/`high`/`veryHigh`) |
+| `MAX_PRIORITY_FEE_LAMPORTS` | `5000000` | Priority fee tavanı (0.005 SOL) |
+| `DYNAMIC_SLIPPAGE` | `true` | Jupiter dinamik slippage |
+| `DYNAMIC_SLIPPAGE_MAX_BPS` | `1500` | Dynamic slippage tavan |
+| `BUY_SLIPPAGE_BPS` | `500` | Alımda sabit slippage tavanı |
+| `SELL_SLIPPAGE_BPS` | `700` | Satışta sabit slippage tavanı |
+
+## Kaynaklar (KATMAN 1)
+
+- DexScreener: `latest_profiles`, `latest_boosted`, `top_boosted`
+- Pump.fun graduation hook: bonding curve tamamlanan tokenlar (Raydium'a geçer geçmez)
+  - `PUMPFUN_ENABLED=true` (default), `PUMPFUN_FETCH_LIMIT=30`
+
 ## TODO
 
 - [ ] Manuel `/close <symbol>` komutu
-- [ ] PnL özet raporu `/pnl` (haftalık)
 - [ ] Birden çok TP seviyesine RugCheck snapshot'ı
-- [ ] Pump.fun graduation hook'u (yeni listings için)
+- [ ] Pozisyon büyüklüğü skor/profile'a göre ölçeklendirme (Kelly-lite)
+- [ ] Jito bundle desteği (priority fee bid race için)

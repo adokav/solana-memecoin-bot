@@ -48,14 +48,17 @@ class Jupiter:
         amount: int,
         slippage_bps: int | None = None,
     ) -> dict | None:
-        params = {
+        params: dict[str, str] = {
             "inputMint": input_mint,
             "outputMint": output_mint,
             "amount": str(amount),
-            "slippageBps": str(slippage_bps or config.slippage_bps),
             "onlyDirectRoutes": "false",
             "asLegacyTransaction": "false",
         }
+        # dynamicSlippage'ı swap aşamasında veriyoruz; quote'a slippageBps yine
+        # tavan olarak konuluyor — boş bırakmak quote'u "no slippage" sayıp
+        # impact filtresini saptırabiliyor.
+        params["slippageBps"] = str(slippage_bps or config.slippage_bps)
         try:
             r = await self._http.get(JUP_QUOTE, params=params)
             if r.status_code == 400:
@@ -106,14 +109,25 @@ class Jupiter:
 
     # ---------- TX gönderim ----------
 
-    async def _build_and_send(self, quote_resp: dict) -> str:
-        body = {
+    def _swap_body(self, quote_resp: dict) -> dict:
+        body: dict = {
             "quoteResponse": quote_resp,
             "userPublicKey": str(self.kp.pubkey()),
             "wrapAndUnwrapSol": True,
             "dynamicComputeUnitLimit": True,
-            "prioritizationFeeLamports": "auto",
+            "prioritizationFeeLamports": {
+                "priorityLevelWithMaxLamports": {
+                    "maxLamports": int(config.max_priority_fee_lamports),
+                    "priorityLevel": config.priority_fee_level,
+                }
+            },
         }
+        if config.dynamic_slippage_enabled:
+            body["dynamicSlippage"] = {"maxBps": int(config.dynamic_slippage_max_bps)}
+        return body
+
+    async def _build_and_send(self, quote_resp: dict) -> str:
+        body = self._swap_body(quote_resp)
         r = await self._http.post(JUP_SWAP, json=body)
         if r.status_code != 200:
             raise JupiterError(f"swap build failed: {r.status_code} {r.text}")
@@ -135,7 +149,10 @@ class Jupiter:
     async def buy(self, token_mint: str, sol_amount: float) -> tuple[str, int]:
         """SOL -> token. Dönüş: (tx_sig, alınan_raw_token_miktarı)."""
         lamports = int(sol_amount * LAMPORTS_PER_SOL)
-        q = await self.quote(config.sol_mint, token_mint, lamports)
+        q = await self.quote(
+            config.sol_mint, token_mint, lamports,
+            slippage_bps=config.buy_slippage_bps,
+        )
         if not q:
             raise JupiterError("no route for buy")
         out_amount = int(q["outAmount"])
@@ -144,7 +161,10 @@ class Jupiter:
 
     async def sell(self, token_mint: str, token_amount_raw: int) -> tuple[str, int]:
         """Token -> SOL (tam tutar). Dönüş: (tx_sig, alınan_lamports)."""
-        q = await self.quote(token_mint, config.sol_mint, token_amount_raw)
+        q = await self.quote(
+            token_mint, config.sol_mint, token_amount_raw,
+            slippage_bps=config.sell_slippage_bps,
+        )
         if not q:
             raise JupiterError("no route for sell")
         out_lamports = int(q["outAmount"])

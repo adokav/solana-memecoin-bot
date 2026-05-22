@@ -13,6 +13,7 @@ from typing import Literal
 
 from config import config
 from dexscreener import DexScreener
+from pumpfun import PumpFun
 
 log = logging.getLogger(__name__)
 
@@ -258,8 +259,9 @@ def _score(c: Candidate) -> tuple[float, dict]:
 # ---------- Ana Screener ----------
 
 class Screener:
-    def __init__(self, ds: DexScreener) -> None:
+    def __init__(self, ds: DexScreener, pf: PumpFun | None = None) -> None:
         self.ds = ds
+        self.pf = pf
         # {base_token: (last_alerted_ts, score)}  score=0 → red (rug/honeypot), uzun cooldown
         self._cooldown: dict[str, tuple[float, float]] = {}
         # {base_token: [(ts, liquidity_usd), ...]}  son N dakikadaki likidite snapshot'ları
@@ -324,9 +326,23 @@ class Screener:
                 else:
                     sol_tokens.append(addr)
 
+        # Pump.fun graduation kancası: bonding curve tamamlanan tokenları
+        # DexScreener indexlemeden önce yakala
+        src_pump: list[str] = []
+        if self.pf is not None and config.pumpfun_enabled:
+            src_pump = await self.pf.recently_graduated()
+            for addr in src_pump:
+                if not addr or addr in seen_tokens:
+                    continue
+                seen_tokens.add(addr)
+                if self._on_cooldown(addr):
+                    on_cd += 1
+                else:
+                    sol_tokens.append(addr)
+
         log.info(
-            "scan src: profiles=%d boosted=%d top=%d | sol unique=%d | cooldown=%d | to_fetch=%d",
-            len(src_profiles), len(src_latest), len(src_top),
+            "scan src: profiles=%d boosted=%d top=%d pump=%d | sol unique=%d | cooldown=%d | to_fetch=%d",
+            len(src_profiles), len(src_latest), len(src_top), len(src_pump),
             len(seen_tokens), on_cd, min(len(sol_tokens), 80),
         )
 
