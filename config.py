@@ -66,6 +66,19 @@ class Config:
     buy_amount_sol: float = field(default_factory=lambda: _float("BUY_AMOUNT_SOL", 0.01))
     slippage_bps: int = field(default_factory=lambda: _int("SLIPPAGE_BPS", 300))
 
+    # --- Yürütme kalitesi ---
+    # Alımda hız > slippage, satışta tam tersine ihtiyaç var
+    buy_slippage_bps: int = field(default_factory=lambda: _int("BUY_SLIPPAGE_BPS", 500))
+    sell_slippage_bps: int = field(default_factory=lambda: _int("SELL_SLIPPAGE_BPS", 700))
+    # dynamicSlippage: Jupiter quote'a göre slippage'ı kendi adapte eder (max cap altında)
+    dynamic_slippage_enabled: bool = field(default_factory=lambda: _bool("DYNAMIC_SLIPPAGE", True))
+    dynamic_slippage_max_bps: int = field(default_factory=lambda: _int("DYNAMIC_SLIPPAGE_MAX_BPS", 1500))
+    # Priority fee: memecoin sniper'da yarışı kazanmak için yüksek seviye lazım
+    # priorityLevel: "medium" | "high" | "veryHigh"
+    priority_fee_level: str = field(default_factory=lambda: _str("PRIORITY_FEE_LEVEL", "veryHigh"))
+    # Üst sınır: 0.005 SOL ~ $1 civarı, sniper için makul tavan
+    max_priority_fee_lamports: int = field(default_factory=lambda: _int("MAX_PRIORITY_FEE_LAMPORTS", 5_000_000))
+
     # --- Kademeli çıkış ---
     tp1_trigger: float = field(default_factory=lambda: _float("TP1_TRIGGER_PCT", 30))
     tp1_sell: float = field(default_factory=lambda: _float("TP1_SELL_PCT", 30))
@@ -142,6 +155,11 @@ class Config:
     # Meşru takım ortalama 2-3 token açar; 10+ ciddi şüphe
     dev_wallet_check_enabled: bool = field(default_factory=lambda: _bool("DEV_WALLET_CHECK_ENABLED", True))
     max_creator_tokens: int = field(default_factory=lambda: _int("MAX_CREATOR_TOKENS", 10))
+
+    # --- Kaynak: pump.fun graduation hook ---
+    # Graduate olan token Raydium'a düşer; DexScreener indexlemeden önce yakala
+    pumpfun_enabled: bool = field(default_factory=lambda: _bool("PUMPFUN_ENABLED", True))
+    pumpfun_fetch_limit: int = field(default_factory=lambda: _int("PUMPFUN_FETCH_LIMIT", 30))
 
     # Backtest / sinyal performans logu
     signal_tracking_enabled: bool = field(default_factory=lambda: _bool("SIGNAL_TRACKING_ENABLED", True))

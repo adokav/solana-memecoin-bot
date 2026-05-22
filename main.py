@@ -15,6 +15,8 @@ from config import config
 from dexscreener import DexScreener
 from jupiter import Jupiter, LAMPORTS_PER_SOL
 from monitor import Monitor
+from pnl import format_report, summarize
+from pumpfun import PumpFun
 from rugcheck import RugCheckClient, SafetyReport
 from screener import Candidate, Screener
 from signal_log import SignalLog
@@ -33,11 +35,12 @@ class Bot:
     def __init__(self) -> None:
         kp = load_keypair()
         self.ds = DexScreener()
+        self.pf = PumpFun() if config.pumpfun_enabled else None
         self.jup = Jupiter(kp)
         self.rug = RugCheckClient()
         self.store = Store.load()
         self.tg = TelegramHub()
-        self.screener = Screener(self.ds)
+        self.screener = Screener(self.ds, self.pf)
         self.signal_log = SignalLog()
         self.monitor = Monitor(self.ds, self.jup, self.store, self.tg)
         self._stop = asyncio.Event()
@@ -151,6 +154,12 @@ class Bot:
             f"+100% isabet (24h): <code>{s['hit_rate_100pct_24h']:.0f}%</code>\n"
             f"Beklemede: <code>{s['pending']}</code>"
         )
+
+    # ---------- /pnl ----------
+
+    async def pnl_text(self, days: int) -> str:
+        summary = summarize(self.store.positions, days=days)
+        return format_report(summary)
 
     # ---------- /health ----------
 
@@ -276,13 +285,14 @@ class Bot:
         self.tg.set_status_callback(self.status_text)
         self.tg.set_health_callback(self.health_text)
         self.tg.set_perf_callback(self.perf_text)
+        self.tg.set_pnl_callback(self.pnl_text)
 
         await self.tg.start()
         await self.tg.info(
             f"🤖 <b>Memecoin Sniper başladı</b>\n"
             f"Cüzdan: <code>{self.wallet_pubkey[:8]}...{self.wallet_pubkey[-6:]}</code>\n"
             f"Tarama her {config.scan_interval}s, min skor {config.min_score_to_alert}\n"
-            f"Komutlar: /status /health"
+            f"Komutlar: /status /health /perf /pnl"
         )
 
         # Sinyal yakalama (Render restart için graceful shutdown)
@@ -316,6 +326,8 @@ class Bot:
         await self.ds.close()
         await self.jup.close()
         await self.rug.close()
+        if self.pf is not None:
+            await self.pf.close()
 
 
 def main() -> None:

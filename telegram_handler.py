@@ -108,10 +108,12 @@ class TelegramHub:
         self.app.add_handler(CommandHandler("status", self._status_cmd))
         self.app.add_handler(CommandHandler("health", self._health_cmd))
         self.app.add_handler(CommandHandler("perf", self._perf_cmd))
+        self.app.add_handler(CommandHandler("pnl", self._pnl_cmd))
         self.app.add_handler(CallbackQueryHandler(self._on_button))
         self._status_cb: Callable[[], Awaitable[str]] | None = None
         self._health_cb: Callable[[], Awaitable[str]] | None = None
         self._perf_cb: Callable[[], Awaitable[str]] | None = None
+        self._pnl_cb: Callable[[int], Awaitable[str]] | None = None
         self._chat_id = config.telegram_chat_id
 
     def set_status_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
@@ -123,13 +125,17 @@ class TelegramHub:
     def set_perf_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
         self._perf_cb = cb
 
+    def set_pnl_callback(self, cb: Callable[[int], Awaitable[str]]) -> None:
+        self._pnl_cb = cb
+
     async def _start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
             "🤖 Memecoin Sniper Bot aktif.\n\n"
             "Komutlar:\n"
             "  /status — açık pozisyonlar\n"
             "  /health — bot canlı mı, son tarama\n"
-            "  /perf — sinyal performans özeti"
+            "  /perf — sinyal performans özeti\n"
+            "  /pnl [gün] — kapanan pozisyon kâr/zarar raporu"
         )
 
     async def _status_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -143,6 +149,16 @@ class TelegramHub:
 
     async def _perf_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         text = await self._perf_cb() if self._perf_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def _pnl_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        days = 0
+        if ctx.args:
+            try:
+                days = max(0, int(ctx.args[0]))
+            except (ValueError, TypeError):
+                days = 0
+        text = await self._pnl_cb(days) if self._pnl_cb else "Hazır değil."
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def _on_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
