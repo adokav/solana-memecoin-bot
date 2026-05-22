@@ -44,6 +44,9 @@ BOT_COMMANDS: list[tuple[str, str]] = [
     ("halt", "Yeni alımları durdur"),
     ("resume", "Alımları tekrar serbest bırak"),
     ("close", "Pozisyonu manuel kapat (örn /close SHIB)"),
+    ("wallets", "Takip edilen smart wallet'ları listele"),
+    ("addwallet", "Smart wallet ekle: /addwallet <adres> [label]"),
+    ("rmwallet", "Smart wallet çıkar: /rmwallet <adres>"),
 ]
 
 # Klavyenin üzerinde sabit duran komut buton grid'i
@@ -149,6 +152,9 @@ class TelegramHub:
         self.app.add_handler(CommandHandler("resume", self._resume_cmd))
         self.app.add_handler(CommandHandler("close", self._close_cmd))
         self.app.add_handler(CommandHandler("analog", self._analog_cmd))
+        self.app.add_handler(CommandHandler("wallets", self._wallets_cmd))
+        self.app.add_handler(CommandHandler("addwallet", self._addwallet_cmd))
+        self.app.add_handler(CommandHandler("rmwallet", self._rmwallet_cmd))
         self.app.add_handler(CallbackQueryHandler(self._on_button))
         self._status_cb: Callable[[], Awaitable[str]] | None = None
         self._health_cb: Callable[[], Awaitable[str]] | None = None
@@ -160,6 +166,9 @@ class TelegramHub:
         self._resume_cb: Callable[[], Awaitable[str]] | None = None
         self._close_cb: Callable[[str], Awaitable[str]] | None = None
         self._analog_cb: Callable[[], Awaitable[str]] | None = None
+        self._wallets_cb: Callable[[], Awaitable[str]] | None = None
+        self._addwallet_cb: Callable[[str, str], Awaitable[str]] | None = None
+        self._rmwallet_cb: Callable[[str], Awaitable[str]] | None = None
         self._chat_id = config.telegram_chat_id
 
     def set_status_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
@@ -192,6 +201,15 @@ class TelegramHub:
     def set_analog_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
         self._analog_cb = cb
 
+    def set_wallets_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
+        self._wallets_cb = cb
+
+    def set_addwallet_callback(self, cb: Callable[[str, str], Awaitable[str]]) -> None:
+        self._addwallet_cb = cb
+
+    def set_rmwallet_callback(self, cb: Callable[[str], Awaitable[str]]) -> None:
+        self._rmwallet_cb = cb
+
     async def _start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
             "🤖 Memecoin Sniper Bot aktif.\n\n"
@@ -205,7 +223,10 @@ class TelegramHub:
             "  /halt [sebep] — yeni alımları durdur\n"
             "  /resume — alımları tekrar serbest bırak\n"
             "  /close &lt;symbol&gt; — açık pozisyonu manuel kapat\n"
-            "  /analog — bugüne benzer geçmiş ortamlarda sinyal performansı",
+            "  /analog — bugüne benzer geçmiş ortamlarda sinyal performansı\n"
+            "  /wallets — smart wallet listesi\n"
+            "  /addwallet &lt;adres&gt; [label] — smart wallet ekle\n"
+            "  /rmwallet &lt;adres&gt; — smart wallet çıkar",
             reply_markup=PERSISTENT_KEYBOARD,
         )
 
@@ -262,6 +283,35 @@ class TelegramHub:
 
     async def _analog_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         text = await self._analog_cb() if self._analog_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def _wallets_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        text = await self._wallets_cb() if self._wallets_cb else "Hazır değil."
+        await update.message.reply_text(
+            text, parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+        )
+
+    async def _addwallet_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not ctx.args:
+            await update.message.reply_text(
+                "Kullanım: <code>/addwallet &lt;adres&gt; [label]</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        addr = ctx.args[0].strip()
+        label = " ".join(ctx.args[1:]).strip() if len(ctx.args) > 1 else ""
+        text = await self._addwallet_cb(addr, label) if self._addwallet_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def _rmwallet_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not ctx.args:
+            await update.message.reply_text(
+                "Kullanım: <code>/rmwallet &lt;adres&gt;</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        addr = ctx.args[0].strip()
+        text = await self._rmwallet_cb(addr) if self._rmwallet_cb else "Hazır değil."
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def _on_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

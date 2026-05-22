@@ -16,6 +16,7 @@ from analog import analog_report
 from circuit_breaker import CircuitBreaker
 from config import config
 from dexscreener import DexScreener
+from helius import Helius
 from jupiter import Jupiter, LAMPORTS_PER_SOL
 from macro import MacroCollector, append_snapshot, format_snapshot, latest_snapshot
 from monitor import Monitor
@@ -26,6 +27,11 @@ from rugcheck import RugCheckClient, SafetyReport
 from screener import Candidate, Screener
 from signal_log import SignalLog
 from sizing import size_for_candidate
+from smart_wallets import (
+    SmartWalletStore,
+    SmartWalletTracker,
+    format_wallets_text,
+)
 from storage import Position, Store
 from telegram_handler import TelegramHub, set_buy_callback
 from wallet import load_keypair
@@ -42,11 +48,21 @@ class Bot:
         kp = load_keypair()
         self.ds = DexScreener()
         self.pf = PumpFun() if config.pumpfun_enabled else None
+        self.helius: Helius | None = (
+            Helius() if config.smart_wallets_enabled and config.helius_api_key else None
+        )
+        self.smart_store: SmartWalletStore | None = (
+            SmartWalletStore.load() if config.smart_wallets_enabled else None
+        )
+        self.smart_tracker: SmartWalletTracker | None = (
+            SmartWalletTracker(self.smart_store, self.helius)
+            if self.smart_store is not None and self.helius is not None else None
+        )
         self.jup = Jupiter(kp)
         self.rug = RugCheckClient()
         self.store = Store.load()
         self.tg = TelegramHub()
-        self.screener = Screener(self.ds, self.pf)
+        self.screener = Screener(self.ds, self.pf, self.smart_store)
         self.signal_log = SignalLog()
         self.monitor = Monitor(self.ds, self.jup, self.store, self.tg)
         self.paper_store = PaperStore.load() if config.paper_trading_enabled else None
@@ -198,6 +214,30 @@ class Bot:
     async def analog_text(self) -> str:
         return analog_report(self.signal_log)
 
+    # ---------- /wallets, /addwallet, /rmwallet ----------
+
+    async def wallets_text(self) -> str:
+        if self.smart_store is None:
+            return "📭 Smart wallet tracking kapalı (SMART_WALLETS_ENABLED=false)."
+        return format_wallets_text(self.smart_store)
+
+    async def addwallet_text(self, addr: str, label: str) -> str:
+        if self.smart_store is None:
+            return "Smart wallet tracking kapalı."
+        if not (32 <= len(addr) <= 64):
+            return f"⚠️ Adres formatı geçersiz: <code>{addr}</code>"
+        if self.smart_store.add_wallet(addr, label):
+            disp = f"{addr[:6]}..{addr[-4:]}" + (f" [{label}]" if label else "")
+            return f"✅ Eklendi: <code>{disp}</code>"
+        return f"⚠️ Zaten kayıtlı: <code>{addr[:6]}..{addr[-4:]}</code>"
+
+    async def rmwallet_text(self, addr: str) -> str:
+        if self.smart_store is None:
+            return "Smart wallet tracking kapalı."
+        if self.smart_store.remove_wallet(addr):
+            return f"✅ Çıkarıldı: <code>{addr[:6]}..{addr[-4:]}</code>"
+        return f"⚠️ Listede yok: <code>{addr[:6]}..{addr[-4:]}</code>"
+
     # ---------- /status ----------
 
     async def status_text(self) -> str:
@@ -265,6 +305,16 @@ class Bot:
     async def health_text(self) -> str:
         last_scan_ago = time.time() - self._last_scan_ts if self._last_scan_ts else -1
         auto = "AÇIK 🤖" if config.auto_trade_enabled else "kapalı"
+        smart_line = ""
+        if self.smart_store is not None:
+            tracked = len(self.smart_store.wallets)
+            self.smart_store.cleanup_recent_buys()
+            tokens_seen = len(self.smart_store.recent_buys)
+            smart_line = (
+                f"Smart wallet: <code>{tracked}</code> takipte, "
+                f"son {config.smart_buy_window_min}dk içinde "
+                f"<code>{tokens_seen}</code> token sinyali\n"
+            )
         return (
             f"💓 <b>Bot sağlığı</b>\n"
             f"Cüzdan: <code>{self.wallet_pubkey[:8]}...{self.wallet_pubkey[-6:]}</code>\n"
@@ -274,7 +324,8 @@ class Bot:
             f"Tarama: her <code>{config.scan_interval}s</code>\n"
             f"Pozisyon takip: her <code>{config.monitor_interval}s</code>\n"
             f"Auto-trade: <code>{auto}</code> "
-            f"(min skor <code>{config.auto_trade_min_score:.0f}</code>)\n\n"
+            f"(min skor <code>{config.auto_trade_min_score:.0f}</code>)\n"
+            f"{smart_line}\n"
             f"{self.breaker.status_text(self.store.positions)}"
         )
 
@@ -375,6 +426,19 @@ class Bot:
                     log.exception("paper monitor loop error")
             await asyncio.sleep(config.monitor_interval)
 
+    # ---------- Loop: smart wallet polling ----------
+
+    async def smart_wallet_loop(self) -> None:
+        # Bot start'ın hemen ardından bir miktar gecikme
+        await asyncio.sleep(10)
+        while not self._stop.is_set():
+            if self.smart_tracker is not None:
+                try:
+                    await self.smart_tracker.poll_all()
+                except Exception:
+                    log.exception("smart wallet loop error")
+            await asyncio.sleep(config.smart_wallets_poll_interval)
+
     # ---------- Loop: makro snapshot ----------
 
     async def macro_loop(self) -> None:
@@ -445,6 +509,9 @@ class Bot:
         self.tg.set_resume_callback(self.resume_text)
         self.tg.set_close_callback(self.close_text)
         self.tg.set_analog_callback(self.analog_text)
+        self.tg.set_wallets_callback(self.wallets_text)
+        self.tg.set_addwallet_callback(self.addwallet_text)
+        self.tg.set_rmwallet_callback(self.rmwallet_text)
 
         await self.tg.start()
         await self.tg.info(
@@ -475,6 +542,8 @@ class Bot:
             tasks.append(asyncio.create_task(self.paper_monitor_loop(), name="paper"))
         if self.macro is not None:
             tasks.append(asyncio.create_task(self.macro_loop(), name="macro"))
+        if self.smart_tracker is not None:
+            tasks.append(asyncio.create_task(self.smart_wallet_loop(), name="smart"))
 
         await self._stop.wait()
         log.info("shutting down...")
@@ -496,6 +565,8 @@ class Bot:
             await self.pf.close()
         if self.macro is not None:
             await self.macro.close()
+        if self.helius is not None:
+            await self.helius.close()
 
 
 def main() -> None:

@@ -112,6 +112,9 @@ Diğer parametrelerin hepsi `.env.example`'da default ile geliyor — istersen R
 | `/resume` | Devre kesiciyi kapat, alımlar tekrar serbest |
 | `/close <symbol>` | Açık pozisyonu manuel kapat |
 | `/analog` | Bugüne benzer geçmiş makro ortamlarda sinyal performansı |
+| `/wallets` | Takip edilen smart wallet listesi |
+| `/addwallet <adres> [label]` | Smart wallet ekle |
+| `/rmwallet <adres>` | Smart wallet çıkar |
 
 ## Skor Sistemi (max 110)
 
@@ -281,6 +284,27 @@ bugünkü makroya (SOL Δ24h, BTC dom, F&G, pump grad rate) ağırlıklı
 euclidean benzerlik ile en yakın geçmiş sinyalleri bulup ortalama 24h
 zirve performansını raporlar. **En az 5 makro-etiketli finalize sinyal**
 biriktikten sonra anlamlı çalışır (1-2 hafta).
+
+## Smart wallet tracking (en güçlü erken sinyal)
+
+`SMART_WALLETS_ENABLED=true` (default) ile aktif. Takip edilen cüzdanların
+SOL → memecoin swap'larını Helius enhanced transactions API ile her
+`SMART_WALLETS_POLL_INTERVAL` (60s) saniyede bir çekeriz. Bir tokene
+`SMART_BUY_WINDOW_MIN` (60dk) içinde N+ smart wallet alımı görürse:
+- Skor sistemine **+0…+25 puan** ekler (komponent: `smart_signal`)
+- N ≥ `SMART_MIN_BUYS_FOR_INJECT` (2) ise DexScreener'da olmasa bile
+  token scan'e enjekte edilir — fiyat hareketinden önce yakalama
+
+Cüzdan listesi `data/smart_wallets.json`'da. İlk seed için env:
+`SMART_WALLETS=adres1:label1,adres2:label2`. Canlıda `/addwallet` ve
+`/rmwallet` ile yönetilir; `/wallets` ile listelenir.
+
+## Profile-aware scoring
+
+`PROFILE_AWARE_SCORING=true` (default) ile her skor componenti `early` ve
+`trend` profillerinde farklı ağırlıkla hesaplanır. Örnek: m5 ivmesi early'de
+1.3×, trend'de 0.7×; FDV/liq kalitesi early'de 0.7×, trend'de 1.3×.
+Tablodaki ağırlıklar `screener.py:PROFILE_WEIGHTS`'te.
 
 ## TODO
 

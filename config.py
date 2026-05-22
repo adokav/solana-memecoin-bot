@@ -205,6 +205,19 @@ class Config:
     pumpfun_enabled: bool = field(default_factory=lambda: _bool("PUMPFUN_ENABLED", True))
     pumpfun_fetch_limit: int = field(default_factory=lambda: _int("PUMPFUN_FETCH_LIMIT", 30))
 
+    # --- Kaynak + skor: Smart wallet tracking ---
+    smart_wallets_enabled: bool = field(default_factory=lambda: _bool("SMART_WALLETS_ENABLED", True))
+    # İlk run'da dosya yoksa env'den seed: "addr1:label1,addr2:label2,..."
+    smart_wallets_seed: str = field(default_factory=lambda: _str("SMART_WALLETS", ""))
+    smart_wallets_poll_interval: int = field(default_factory=lambda: _int("SMART_WALLETS_POLL_INTERVAL", 60))
+    smart_buy_window_min: int = field(default_factory=lambda: _int("SMART_BUY_WINDOW_MIN", 60))
+    # Bir tokenı sadece smart wallet alımlarından dolayı scan'e enjekte etmek için min eşik
+    smart_min_buys_for_inject: int = field(default_factory=lambda: _int("SMART_MIN_BUYS_FOR_INJECT", 2))
+
+    # --- Profile-aware scoring ---
+    # Skor componentlerini early vs trend için farklı ağırlıklarla ölçeklendir
+    profile_aware_scoring: bool = field(default_factory=lambda: _bool("PROFILE_AWARE_SCORING", True))
+
     # Backtest / sinyal performans logu
     signal_tracking_enabled: bool = field(default_factory=lambda: _bool("SIGNAL_TRACKING_ENABLED", True))
     signal_tracking_interval: int = field(default_factory=lambda: _int("SIGNAL_TRACKING_INTERVAL", 600))
