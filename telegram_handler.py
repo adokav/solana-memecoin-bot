@@ -3,7 +3,13 @@ import logging
 import time
 from typing import Awaitable, Callable
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -23,6 +29,34 @@ _pending: dict[str, tuple[Candidate, SafetyReport]] = {}
 
 BuyCallback = Callable[[Candidate, SafetyReport], Awaitable[None]]
 _on_buy: BuyCallback | None = None
+
+
+# Telegram menu button'u için (yazma alanının yanındaki ikon)
+BOT_COMMANDS: list[tuple[str, str]] = [
+    ("start", "Karşılama"),
+    ("status", "Açık pozisyonlar + PnL"),
+    ("health", "Bot sağlığı + devre kesici"),
+    ("perf", "Sinyal performansı (1h/24h zirve)"),
+    ("pnl", "Kapanan pozisyon PnL (örn /pnl 7)"),
+    ("paper", "Paper trading raporu"),
+    ("macro", "Son makro snapshot"),
+    ("analog", "Benzer geçmiş makro ortam performansı"),
+    ("halt", "Yeni alımları durdur"),
+    ("resume", "Alımları tekrar serbest bırak"),
+    ("close", "Pozisyonu manuel kapat (örn /close SHIB)"),
+]
+
+# Klavyenin üzerinde sabit duran komut buton grid'i
+PERSISTENT_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        ["/status", "/health"],
+        ["/pnl", "/paper"],
+        ["/macro", "/analog"],
+        ["/halt", "/resume"],
+    ],
+    resize_keyboard=True,
+    is_persistent=True,
+)
 
 
 def set_buy_callback(cb: BuyCallback) -> None:
@@ -171,7 +205,8 @@ class TelegramHub:
             "  /halt [sebep] — yeni alımları durdur\n"
             "  /resume — alımları tekrar serbest bırak\n"
             "  /close &lt;symbol&gt; — açık pozisyonu manuel kapat\n"
-            "  /analog — bugüne benzer geçmiş ortamlarda sinyal performansı"
+            "  /analog — bugüne benzer geçmiş ortamlarda sinyal performansı",
+            reply_markup=PERSISTENT_KEYBOARD,
         )
 
     async def _status_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -281,17 +316,27 @@ class TelegramHub:
             reply_markup=_keyboard(key),
         )
 
-    async def info(self, text: str) -> None:
-        await self.app.bot.send_message(
-            chat_id=self._chat_id,
-            text=text,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
+    async def info(self, text: str, with_keyboard: bool = False) -> None:
+        kwargs: dict = {
+            "chat_id": self._chat_id,
+            "text": text,
+            "parse_mode": ParseMode.HTML,
+            "disable_web_page_preview": True,
+        }
+        if with_keyboard:
+            kwargs["reply_markup"] = PERSISTENT_KEYBOARD
+        await self.app.bot.send_message(**kwargs)
 
     async def start(self) -> None:
         await self.app.initialize()
         await self.app.start()
+        # Telegram menu butonu — yazma alanının yanındaki komut listesi
+        try:
+            await self.app.bot.set_my_commands(
+                [BotCommand(cmd, desc) for cmd, desc in BOT_COMMANDS]
+            )
+        except Exception:
+            log.exception("set_my_commands failed (non-fatal)")
         await self.app.updater.start_polling(drop_pending_updates=True)
         log.info("telegram started")
 

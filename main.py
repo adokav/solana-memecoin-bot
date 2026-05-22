@@ -453,7 +453,8 @@ class Bot:
             f"Tarama her {config.scan_interval}s, min skor {config.min_score_to_alert}\n"
             f"Auto-trade: <code>{'AÇIK' if config.auto_trade_enabled else 'kapalı'}</code>  "
             f"Devre kesici: <code>{'açık' if self.breaker.is_open() else 'kapalı'}</code>\n"
-            f"Komutlar: /status /health /perf /pnl /paper /macro /halt /resume /close /analog"
+            f"Komutlar: alttaki butonlar veya menu ikonundan",
+            with_keyboard=True,
         )
 
         # Sinyal yakalama (Render restart için graceful shutdown)
