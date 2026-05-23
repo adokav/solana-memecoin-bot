@@ -318,6 +318,29 @@ cüzdan otomatik disable edilir:
 Yeni kalite hesabı her `WALLET_OUTCOMES_INTERVAL` (default 10dk) bir
 çalışır. Disable olduğunda Telegram'a uyarı düşer.
 
+### Pump.fun pre-graduation alert (sosyal velocity ile)
+
+Bot direkt bonding curve trade edemez (Jupiter route yok), ama yaklaşan
+graduation'ları yüksek sosyal aktiviteyle filtreleyip alert atar.
+
+Filtreler (hepsi geçmesi şart):
+- `PREPUMP_MIN_PROGRESS_PCT` (70) — bonding curve ilerlemesi
+- `PREPUMP_MIN_MC_USD` (30k) — minimum market cap
+- `PREPUMP_MIN_REPLIES` (30) — bot/spam değil, gerçek community
+- `PREPUMP_MIN_VELOCITY_PER_HOUR` (10) — son saatlerde reply artış hızı
+
+Reply velocity Twitter mention velocity'nin **ücretsiz proxy**'sidir —
+pump.fun coin sayfalarındaki yorum sayısının saatlik artış hızı.
+Twitter API'sı $100/ay olduğu için, memecoin community engagement için
+pump.fun yorumları en pragmatik ücretsiz sinyaldir.
+
+Cooldown 24 saat (aynı coin tekrar alert atmaz). Her
+`PREPUMP_CHECK_INTERVAL` (5dk) bir tarama yapılır.
+
+**Kullanıcı için:** Alert geldiğinde manuel pump.fun'da satın alabilir.
+Bot graduation olunca aynı tokeni zaten yakalıyor (mevcut pipeline);
+pre-grad alert bu yüzden bilgi avantajı + erken giriş fırsatı.
+
 ### Smart wallet exit signals & hold-time safety re-check
 
 Smart wallet polling artık alımları VE satışları yakalıyor. Pozisyon

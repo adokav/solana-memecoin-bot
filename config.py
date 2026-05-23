@@ -207,6 +207,16 @@ class Config:
     # Graduate olan token Raydium'a düşer; DexScreener indexlemeden önce yakala
     pumpfun_enabled: bool = field(default_factory=lambda: _bool("PUMPFUN_ENABLED", True))
     pumpfun_fetch_limit: int = field(default_factory=lambda: _int("PUMPFUN_FETCH_LIMIT", 30))
+    # Pre-graduation aktif coin'ler için fetch limiti (sosyal velocity tracking)
+    pumpfun_active_fetch_limit: int = field(default_factory=lambda: _int("PUMPFUN_ACTIVE_FETCH_LIMIT", 100))
+
+    # --- Pre-bonding curve detection + sosyal velocity ---
+    prepump_enabled: bool = field(default_factory=lambda: _bool("PREPUMP_ENABLED", True))
+    prepump_check_interval: int = field(default_factory=lambda: _int("PREPUMP_CHECK_INTERVAL", 300))
+    prepump_min_progress_pct: float = field(default_factory=lambda: _float("PREPUMP_MIN_PROGRESS_PCT", 70))
+    prepump_min_replies: int = field(default_factory=lambda: _int("PREPUMP_MIN_REPLIES", 30))
+    prepump_min_velocity_per_hour: float = field(default_factory=lambda: _float("PREPUMP_MIN_VELOCITY_PER_HOUR", 10))
+    prepump_min_mc_usd: float = field(default_factory=lambda: _float("PREPUMP_MIN_MC_USD", 30000))
 
     # --- Kaynak + skor: Smart wallet tracking ---
     smart_wallets_enabled: bool = field(default_factory=lambda: _bool("SMART_WALLETS_ENABLED", True))
