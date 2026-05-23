@@ -220,6 +220,17 @@ class Config:
     wallet_auto_disable_quality: float = field(default_factory=lambda: _float("WALLET_AUTO_DISABLE_QUALITY", 30))
     wallet_auto_disable_min_samples: int = field(default_factory=lambda: _int("WALLET_AUTO_DISABLE_MIN_SAMPLES", 15))
 
+    # Wallet auto-discovery (kazanan sinyallerin ilk alıcılarından öğren)
+    discovery_enabled: bool = field(default_factory=lambda: _bool("DISCOVERY_ENABLED", True))
+    discovery_interval: int = field(default_factory=lambda: _int("DISCOVERY_INTERVAL", 3600))
+    # +X% zirve yapmış finalize sinyaller "winner" sayılır
+    discovery_winner_threshold_pct: float = field(default_factory=lambda: _float("DISCOVERY_WINNER_THRESHOLD_PCT", 100))
+    # Token oluşumundan sonraki ilk N saatte alanları topla
+    discovery_early_window_h: float = field(default_factory=lambda: _float("DISCOVERY_EARLY_WINDOW_H", 1))
+    # K+ kazananda yakalanan candidate → smart_wallets'a otomatik terfi
+    discovery_min_winners_to_promote: int = field(default_factory=lambda: _int("DISCOVERY_MIN_WINNERS_TO_PROMOTE", 2))
+    discovery_max_winners_per_run: int = field(default_factory=lambda: _int("DISCOVERY_MAX_WINNERS_PER_RUN", 5))
+
     # --- Profile-aware scoring ---
     # Skor componentlerini early vs trend için farklı ağırlıklarla ölçeklendir
     profile_aware_scoring: bool = field(default_factory=lambda: _bool("PROFILE_AWARE_SCORING", True))

@@ -47,6 +47,7 @@ BOT_COMMANDS: list[tuple[str, str]] = [
     ("wallets", "Takip edilen smart wallet'ları listele"),
     ("addwallet", "Smart wallet ekle: /addwallet <adres> [label]"),
     ("rmwallet", "Smart wallet çıkar: /rmwallet <adres>"),
+    ("candidates", "Otomatik keşfedilen aday wallet'ları göster"),
 ]
 
 # Klavyenin üzerinde sabit duran komut buton grid'i
@@ -155,6 +156,7 @@ class TelegramHub:
         self.app.add_handler(CommandHandler("wallets", self._wallets_cmd))
         self.app.add_handler(CommandHandler("addwallet", self._addwallet_cmd))
         self.app.add_handler(CommandHandler("rmwallet", self._rmwallet_cmd))
+        self.app.add_handler(CommandHandler("candidates", self._candidates_cmd))
         self.app.add_handler(CallbackQueryHandler(self._on_button))
         self._status_cb: Callable[[], Awaitable[str]] | None = None
         self._health_cb: Callable[[], Awaitable[str]] | None = None
@@ -169,6 +171,7 @@ class TelegramHub:
         self._wallets_cb: Callable[[], Awaitable[str]] | None = None
         self._addwallet_cb: Callable[[str, str], Awaitable[str]] | None = None
         self._rmwallet_cb: Callable[[str], Awaitable[str]] | None = None
+        self._candidates_cb: Callable[[], Awaitable[str]] | None = None
         self._chat_id = config.telegram_chat_id
 
     def set_status_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
@@ -210,6 +213,9 @@ class TelegramHub:
     def set_rmwallet_callback(self, cb: Callable[[str], Awaitable[str]]) -> None:
         self._rmwallet_cb = cb
 
+    def set_candidates_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
+        self._candidates_cb = cb
+
     async def _start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
             "🤖 Memecoin Sniper Bot aktif.\n\n"
@@ -226,7 +232,8 @@ class TelegramHub:
             "  /analog — bugüne benzer geçmiş ortamlarda sinyal performansı\n"
             "  /wallets — smart wallet listesi\n"
             "  /addwallet &lt;adres&gt; [label] — smart wallet ekle\n"
-            "  /rmwallet &lt;adres&gt; — smart wallet çıkar",
+            "  /rmwallet &lt;adres&gt; — smart wallet çıkar\n"
+            "  /candidates — otomatik keşfedilen aday wallet'lar",
             reply_markup=PERSISTENT_KEYBOARD,
         )
 
@@ -312,6 +319,10 @@ class TelegramHub:
             return
         addr = ctx.args[0].strip()
         text = await self._rmwallet_cb(addr) if self._rmwallet_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def _candidates_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        text = await self._candidates_cb() if self._candidates_cb else "Hazır değil."
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def _on_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
