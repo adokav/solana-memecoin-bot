@@ -22,6 +22,7 @@ from macro import MacroCollector, append_snapshot, format_snapshot, latest_snaps
 from monitor import Monitor
 from paper import PaperMonitor, PaperStore
 from pnl import format_report, summarize
+from prepump import PrePumpDetector, format_prepump_alert
 from pumpfun import PumpFun
 from rugcheck import RugCheckClient, SafetyReport
 from screener import Candidate, Screener
@@ -55,6 +56,10 @@ class Bot:
         kp = load_keypair()
         self.ds = DexScreener()
         self.pf = PumpFun() if config.pumpfun_enabled else None
+        self.prepump: PrePumpDetector | None = (
+            PrePumpDetector(self.pf)
+            if self.pf is not None and config.prepump_enabled else None
+        )
         self.helius: Helius | None = (
             Helius() if config.smart_wallets_enabled and config.helius_api_key else None
         )
@@ -484,6 +489,30 @@ class Bot:
                     log.exception("smart wallet loop error")
             await asyncio.sleep(config.smart_wallets_poll_interval)
 
+    # ---------- Loop: pump.fun pre-graduation alerts ----------
+
+    async def prepump_loop(self) -> None:
+        await asyncio.sleep(60)
+        while not self._stop.is_set():
+            if self.prepump is not None:
+                try:
+                    alerts = await self.prepump.scan()
+                    for coin, velocity in alerts:
+                        log.info(
+                            "prepump alert: $%s mc=$%.0f progress=%.0f%% vel=%.1f/h",
+                            coin.symbol, coin.usd_market_cap,
+                            coin.progress_pct, velocity,
+                        )
+                        try:
+                            await self.tg.info(
+                                format_prepump_alert(coin, velocity)
+                            )
+                        except Exception:
+                            log.exception("prepump telegram alert failed")
+                except Exception:
+                    log.exception("prepump loop error")
+            await asyncio.sleep(config.prepump_check_interval)
+
     # ---------- Loop: wallet auto-discovery ----------
 
     async def discovery_loop(self) -> None:
@@ -669,6 +698,8 @@ class Bot:
             tasks.append(asyncio.create_task(self.wallet_outcomes_loop(), name="wallet_outcomes"))
         if self.discovery is not None:
             tasks.append(asyncio.create_task(self.discovery_loop(), name="discovery"))
+        if self.prepump is not None:
+            tasks.append(asyncio.create_task(self.prepump_loop(), name="prepump"))
 
         await self._stop.wait()
         log.info("shutting down...")
