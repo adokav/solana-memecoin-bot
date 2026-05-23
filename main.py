@@ -34,6 +34,11 @@ from smart_wallets import (
     format_wallets_text,
     update_wallet_stats,
 )
+from wallet_discovery import (
+    CandidateStore,
+    WalletDiscovery,
+    format_candidates_text,
+)
 from storage import Position, Store
 from telegram_handler import TelegramHub, set_buy_callback
 from wallet import load_keypair
@@ -68,6 +73,13 @@ class Bot:
             and self.outcome_store is not None
             else None
         )
+        # Wallet auto-discovery: kazanan sinyallerin ilk alıcılarından öğrenir
+        self.candidate_store: CandidateStore | None = (
+            CandidateStore.load()
+            if config.discovery_enabled and config.smart_wallets_enabled
+            else None
+        )
+        self.discovery: WalletDiscovery | None = None  # signal_log init sonrası set edilecek
         self.jup = Jupiter(kp)
         self.rug = RugCheckClient()
         self.store = Store.load()
@@ -75,6 +87,15 @@ class Bot:
         self.screener = Screener(self.ds, self.pf, self.smart_store)
         self.signal_log = SignalLog()
         self.monitor = Monitor(self.ds, self.jup, self.store, self.tg)
+        if (
+            self.candidate_store is not None
+            and self.smart_store is not None
+            and self.helius is not None
+        ):
+            self.discovery = WalletDiscovery(
+                self.helius, self.ds, self.signal_log,
+                self.candidate_store, self.smart_store,
+            )
         self.paper_store = PaperStore.load() if config.paper_trading_enabled else None
         self.paper_monitor = (
             PaperMonitor(self.ds, self.paper_store)
@@ -247,6 +268,11 @@ class Bot:
         if self.smart_store.remove_wallet(addr):
             return f"✅ Çıkarıldı: <code>{addr[:6]}..{addr[-4:]}</code>"
         return f"⚠️ Listede yok: <code>{addr[:6]}..{addr[-4:]}</code>"
+
+    async def candidates_text(self) -> str:
+        if self.candidate_store is None:
+            return "📭 Wallet discovery kapalı (DISCOVERY_ENABLED=false)."
+        return format_candidates_text(self.candidate_store)
 
     # ---------- /status ----------
 
@@ -452,6 +478,34 @@ class Bot:
                     log.exception("smart wallet loop error")
             await asyncio.sleep(config.smart_wallets_poll_interval)
 
+    # ---------- Loop: wallet auto-discovery ----------
+
+    async def discovery_loop(self) -> None:
+        # İlk çalıştırma sinyal verisi birikene kadar beklesin
+        await asyncio.sleep(120)
+        while not self._stop.is_set():
+            if self.discovery is not None:
+                try:
+                    promoted_n, promoted = await self.discovery.run_once()
+                    if promoted_n > 0:
+                        # Telegram bildirimi: terfi edenler
+                        lines = [
+                            f"🎯 <b>{promoted_n} yeni smart wallet</b> "
+                            f"otomatik keşfedildi:"
+                        ]
+                        for addr, label, hits in promoted[:10]:
+                            short = f"{addr[:6]}..{addr[-4:]}"
+                            lines.append(
+                                f"• <code>{short}</code>  "
+                                f"<i>{label}</i>  ({hits} kazanan)"
+                            )
+                        if promoted_n > 10:
+                            lines.append(f"<i>...ve {promoted_n - 10} daha</i>")
+                        await self.tg.info("\n".join(lines))
+                except Exception:
+                    log.exception("discovery loop error")
+            await asyncio.sleep(config.discovery_interval)
+
     # ---------- Loop: wallet outcome tracking + quality scoring ----------
 
     async def wallet_outcomes_loop(self) -> None:
@@ -573,6 +627,7 @@ class Bot:
         self.tg.set_wallets_callback(self.wallets_text)
         self.tg.set_addwallet_callback(self.addwallet_text)
         self.tg.set_rmwallet_callback(self.rmwallet_text)
+        self.tg.set_candidates_callback(self.candidates_text)
 
         await self.tg.start()
         await self.tg.info(
@@ -606,6 +661,8 @@ class Bot:
         if self.smart_tracker is not None:
             tasks.append(asyncio.create_task(self.smart_wallet_loop(), name="smart"))
             tasks.append(asyncio.create_task(self.wallet_outcomes_loop(), name="wallet_outcomes"))
+        if self.discovery is not None:
+            tasks.append(asyncio.create_task(self.discovery_loop(), name="discovery"))
 
         await self._stop.wait()
         log.info("shutting down...")

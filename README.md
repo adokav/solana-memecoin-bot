@@ -115,6 +115,7 @@ Diğer parametrelerin hepsi `.env.example`'da default ile geliyor — istersen R
 | `/wallets` | Takip edilen smart wallet listesi |
 | `/addwallet <adres> [label]` | Smart wallet ekle |
 | `/rmwallet <adres>` | Smart wallet çıkar |
+| `/candidates` | Otomatik keşfedilen aday wallet'lar |
 
 ## Skor Sistemi (max 110)
 
@@ -316,6 +317,25 @@ cüzdan otomatik disable edilir:
 
 Yeni kalite hesabı her `WALLET_OUTCOMES_INTERVAL` (default 10dk) bir
 çalışır. Disable olduğunda Telegram'a uyarı düşer.
+
+### Otomatik wallet discovery
+
+`DISCOVERY_ENABLED=true` (default) ile bot kendi geçmişinden öğrenir:
+- `signal_log`'taki finalize sinyaller arasında peak ≥
+  `DISCOVERY_WINNER_THRESHOLD_PCT` (default %100) olanları "winner" kabul eder
+- Her winner için Helius'tan o token'ın ilk `DISCOVERY_EARLY_WINDOW_H`
+  (default 1 saat) içindeki alıcılarını çeker
+- Bu cüzdanları `data/wallet_candidates.json`'a candidate olarak yazar,
+  kaç farklı winner'da yakalandığını sayar
+- `DISCOVERY_MIN_WINNERS_TO_PROMOTE` (default 2) kazananı tutturan candidate
+  → otomatik smart_wallets'a terfi + Telegram bildirimi
+
+Discovery her `DISCOVERY_INTERVAL` (default 1 saat) çalışır, her turda
+max `DISCOVERY_MAX_WINNERS_PER_RUN` (5) winner işlenir.
+
+`/candidates` komutu candidate havuzunu, kaç winner'da yakalandıklarını
+gösterir. Bot/MEV gibi yanlış terfi edenler quality scorer tarafından
+15+ örnek sonrası otomatik disable edilir.
 
 ## Profile-aware scoring
 
