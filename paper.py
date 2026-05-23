@@ -22,6 +22,7 @@ from config import config
 from dexscreener import DexScreener
 from rugcheck import SafetyReport
 from screener import Candidate
+from smart_wallets import SmartWalletStore
 from storage import Position, PyramidAdd, TpHit
 
 log = logging.getLogger(__name__)
@@ -92,6 +93,8 @@ class PaperStore:
             profile=c.profile,
             score=c.score + safety.score,
             original_entry_price_usd=entry_price,
+            entry_liquidity_usd=c.liquidity_usd,
+            entry_top10_pct=safety.top10_pct,
         )
         self.positions.append(pos)
         self.save()
@@ -103,9 +106,15 @@ class PaperMonitor:
     sanal fill yapar; tetikler ve eşikler bire bir monitor.py ile aynı.
     """
 
-    def __init__(self, ds: DexScreener, store: PaperStore) -> None:
+    def __init__(
+        self,
+        ds: DexScreener,
+        store: PaperStore,
+        smart: SmartWalletStore | None = None,
+    ) -> None:
         self.ds = ds
         self.store = store
+        self.smart = smart
 
     def _sim_sell_sol(self, pos: Position, sell_amount: int, price: float) -> float:
         """Simüle satıştan dönen SOL — entry fiyatına göre oran + slippage."""
@@ -231,6 +240,32 @@ class PaperMonitor:
             pos.peak_price_usd = price
             self.store.save()
 
+        # Smart wallet exit signal (paper'da da gerçekçi olsun)
+        if self.smart is not None and config.smart_exit_signals_enabled:
+            exits = self.smart.recent_exits_for(pos.base_token)
+            if len(exits) >= 2:
+                self._close_all(pos, price, f"smart wallet exodus ({len(exits)})")
+                return
+            if len(exits) == 1 and pos.trailing_stop_override_pct is None:
+                pos.trailing_stop_override_pct = max(5.0, config.trailing_stop / 2)
+                self.store.save()
+
+        # Likidite drain
+        if (
+            config.hold_safety_check_enabled
+            and pos.entry_liquidity_usd
+            and pos.entry_liquidity_usd > 0
+        ):
+            try:
+                current_liq = float((pair.get("liquidity") or {}).get("usd") or 0)
+            except (TypeError, ValueError):
+                current_liq = 0.0
+            if current_liq > 0:
+                drop = (pos.entry_liquidity_usd - current_liq) / pos.entry_liquidity_usd * 100
+                if drop >= config.hold_liq_drain_pct:
+                    self._close_all(pos, price, f"liquidity drain -{drop:.0f}%")
+                    return
+
         pnl_pct = ((price - pos.entry_price_usd) / pos.entry_price_usd) * 100
         drawdown = ((pos.peak_price_usd - price) / pos.peak_price_usd) * 100
         hit = {h.level for h in pos.tp_hits}
@@ -249,7 +284,8 @@ class PaperMonitor:
         if 1 not in hit and pnl_pct >= config.tp1_trigger:
             self._partial_sell(pos, 1, config.tp1_trigger, config.tp1_sell, price)
             return
-        if pos.tp_hits and drawdown >= config.trailing_stop:
+        trail_pct = pos.trailing_stop_override_pct or config.trailing_stop
+        if pos.tp_hits and drawdown >= trail_pct:
             self._close_all(pos, price, f"trailing -{drawdown:.1f}% from peak")
             return
         if pos.breakeven_armed and pnl_pct <= 0:

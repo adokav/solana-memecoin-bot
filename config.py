@@ -217,6 +217,21 @@ class Config:
     # Bir tokenı sadece smart wallet alımlarından dolayı scan'e enjekte etmek için min eşik
     smart_min_buys_for_inject: int = field(default_factory=lambda: _int("SMART_MIN_BUYS_FOR_INJECT", 2))
 
+    # Smart wallet exit signal: aldığımız tokeni smart wallet'lar dump'ladığında
+    smart_exit_signals_enabled: bool = field(default_factory=lambda: _bool("SMART_EXIT_SIGNALS_ENABLED", True))
+    smart_exit_window_min: int = field(default_factory=lambda: _int("SMART_EXIT_WINDOW_MIN", 30))
+    # Wallet'in alımını görmediysek minimum sell SOL eşiği — gürültü filtresi
+    smart_exit_min_sol: float = field(default_factory=lambda: _float("SMART_EXIT_MIN_SOL", 0.5))
+
+    # Hold-time KATMAN 2 re-check: açık pozisyonu periyodik olarak gözden geçir
+    hold_safety_check_enabled: bool = field(default_factory=lambda: _bool("HOLD_SAFETY_CHECK_ENABLED", True))
+    # Her pozisyon için min kaç saniyede bir safety re-check (RugCheck cache 10dk)
+    hold_safety_check_interval: int = field(default_factory=lambda: _int("HOLD_SAFETY_CHECK_INTERVAL", 300))
+    # Likidite girişten % bu kadar düşerse rug in progress → kapat
+    hold_liq_drain_pct: float = field(default_factory=lambda: _float("HOLD_LIQ_DRAIN_PCT", 35))
+    # Top10 holder konsantrasyonu pp olarak bu kadar sıçrarsa whale alımı/insider → kapat
+    hold_top10_spike_pp: float = field(default_factory=lambda: _float("HOLD_TOP10_SPIKE_PP", 8))
+
     # Wallet quality scorer
     wallet_outcomes_interval: int = field(default_factory=lambda: _int("WALLET_OUTCOMES_INTERVAL", 600))
     # quality < bu eşik VE n >= min_samples → otomatik disable
