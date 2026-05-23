@@ -57,6 +57,12 @@ class Position:
     # Pyramid / DCA — opsiyonel, eski pozisyonlarda yok
     original_entry_price_usd: Optional[float] = None  # add tetiği için referans
     pyramid_adds: list[PyramidAdd] = field(default_factory=list)
+    # Smart wallet exit signal'i 1 cüzdandan geldiğinde trailing daraltılır
+    trailing_stop_override_pct: Optional[float] = None
+    # Hold-time KATMAN 2 re-check için entry snapshot
+    entry_liquidity_usd: Optional[float] = None
+    entry_top10_pct: Optional[float] = None
+    last_safety_check_ts: float = 0.0
 
 
 @dataclass

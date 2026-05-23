@@ -86,7 +86,10 @@ class Bot:
         self.tg = TelegramHub()
         self.screener = Screener(self.ds, self.pf, self.smart_store)
         self.signal_log = SignalLog()
-        self.monitor = Monitor(self.ds, self.jup, self.store, self.tg)
+        self.monitor = Monitor(
+            self.ds, self.jup, self.store, self.tg,
+            smart=self.smart_store, rug=self.rug,
+        )
         if (
             self.candidate_store is not None
             and self.smart_store is not None
@@ -98,7 +101,7 @@ class Bot:
             )
         self.paper_store = PaperStore.load() if config.paper_trading_enabled else None
         self.paper_monitor = (
-            PaperMonitor(self.ds, self.paper_store)
+            PaperMonitor(self.ds, self.paper_store, smart=self.smart_store)
             if self.paper_store is not None else None
         )
         self.macro = MacroCollector(self.pf) if config.macro_snapshot_enabled else None
@@ -182,6 +185,9 @@ class Bot:
             profile=c.profile,
             score=c.score + safety.score,
             original_entry_price_usd=c.price_usd,
+            entry_liquidity_usd=c.liquidity_usd,
+            entry_top10_pct=safety.top10_pct,
+            last_safety_check_ts=time.time(),
         )
         self.store.add(pos)
 

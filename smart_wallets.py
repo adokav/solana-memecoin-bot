@@ -70,6 +70,15 @@ class SmartBuy:
 
 
 @dataclass
+class SmartSell:
+    wallet: str
+    label: str
+    token_mint: str
+    ts: float
+    sol_value: float  # tahmini SOL eline geçen
+
+
+@dataclass
 class WalletBuyOutcome:
     """Bir smart wallet'in tek alımının 24h sonrası performansı."""
     wallet: str
@@ -89,6 +98,8 @@ class SmartWalletStore:
     # Bellek-içi: token_mint -> son SmartBuy'lar. Restart'ta sıfırlanır,
     # poll loop birkaç tur sonra repopulate eder.
     recent_buys: dict[str, list[SmartBuy]] = field(default_factory=dict)
+    # Aynı şekilde son satışlar — exit signal için
+    recent_sells: dict[str, list[SmartSell]] = field(default_factory=dict)
 
     @classmethod
     def load(cls) -> "SmartWalletStore":
@@ -148,6 +159,54 @@ class SmartWalletStore:
 
     def record_buy(self, buy: SmartBuy) -> None:
         self.recent_buys.setdefault(buy.token_mint, []).append(buy)
+
+    def record_sell(self, sell: SmartSell) -> None:
+        self.recent_sells.setdefault(sell.token_mint, []).append(sell)
+
+    def cleanup_recent_sells(self) -> None:
+        cutoff = time.time() - config.smart_exit_window_min * 60
+        for mint in list(self.recent_sells.keys()):
+            self.recent_sells[mint] = [
+                s for s in self.recent_sells[mint] if s.ts > cutoff
+            ]
+            if not self.recent_sells[mint]:
+                del self.recent_sells[mint]
+
+    def recent_exits_for(self, token_mint: str) -> list[SmartSell]:
+        """Bu token için 'full exit' kabul edilen aktif smart wallet satışları.
+
+        Eğer wallet'in alımını recent_buys'ta görmüşsek, satışın SOL değeri
+        alımın %80'i veya üstüyse → exit (partial profit-taking değil).
+        Görmemişsek SMART_EXIT_MIN_SOL eşiğini geçen satışlar exit sayılır.
+        """
+        self.cleanup_recent_sells()
+        sells = self.recent_sells.get(token_mint, [])
+        if not sells:
+            return []
+        active = self._active_addrs()
+        buys_for_token = self.recent_buys.get(token_mint, [])
+        out: list[SmartSell] = []
+        for sell in sells:
+            if sell.wallet not in active:
+                continue
+            matching = next(
+                (b for b in buys_for_token if b.wallet == sell.wallet), None,
+            )
+            if matching is None:
+                if sell.sol_value >= config.smart_exit_min_sol:
+                    out.append(sell)
+            else:
+                if sell.sol_value >= matching.sol_value * 0.8:
+                    out.append(sell)
+        # Aynı cüzdandan birden fazla sell varsa tekilleştir
+        seen: set[str] = set()
+        unique: list[SmartSell] = []
+        for s in out:
+            if s.wallet in seen:
+                continue
+            seen.add(s.wallet)
+            unique.append(s)
+        return unique
 
     def _active_addrs(self) -> set[str]:
         return {a for a, w in self.wallets.items() if not w.disabled}
@@ -296,6 +355,33 @@ def _extract_buy_mint(tx: dict, owner: str) -> tuple[str | None, float]:
     return None, 0.0
 
 
+def _extract_sell_mint(tx: dict, owner: str) -> tuple[str | None, float]:
+    """Helius parsed SWAP tx'inden: owner memecoin satıp aldığı
+    SOL'u döner. (sold_mint, sol_value_received).
+    """
+    events = tx.get("events") or {}
+    swap = events.get("swap") or {}
+
+    sol_value = 0.0
+    native_out = swap.get("nativeOutput") or {}
+    if isinstance(native_out, dict):
+        try:
+            sol_value = float(native_out.get("amount") or 0) / 1_000_000_000
+        except (TypeError, ValueError):
+            sol_value = 0.0
+
+    # Owner'dan giden ilk excluded olmayan token = sattığı memecoin
+    for ti in (swap.get("tokenInputs") or []):
+        if ti.get("userAccount") != owner:
+            continue
+        mint = ti.get("mint")
+        if not mint or mint in EXCLUDED_OUTPUT_MINTS:
+            continue
+        return mint, sol_value
+
+    return None, 0.0
+
+
 # -------- Tracker (polling loop) --------
 
 class SmartWalletTracker:
@@ -369,19 +455,30 @@ class SmartWalletTracker:
             ts = float(tx.get("timestamp") or 0)
             if ts == 0 or ts < window_ts:
                 continue
-            mint, sol_value = _extract_buy_mint(tx, w.address)
-            if not mint:
+            # Alım?
+            buy_mint, buy_sol = _extract_buy_mint(tx, w.address)
+            if buy_mint:
+                self.store.record_buy(SmartBuy(
+                    wallet=w.address, label=w.label, token_mint=buy_mint,
+                    ts=ts, sol_value=buy_sol,
+                ))
+                new_buys += 1
+                try:
+                    await self._record_outcome(w, buy_mint, ts)
+                except Exception:
+                    log.exception(
+                        "outcome record failed %s/%s",
+                        w.address[:8], buy_mint[:8],
+                    )
                 continue
-            self.store.record_buy(SmartBuy(
-                wallet=w.address, label=w.label, token_mint=mint,
-                ts=ts, sol_value=sol_value,
-            ))
-            new_buys += 1
-            # Quality takip için outcome kaydet (DS price lookup)
-            try:
-                await self._record_outcome(w, mint, ts)
-            except Exception:
-                log.exception("outcome record failed %s/%s", w.address[:8], mint[:8])
+
+            # Satış?
+            sell_mint, sell_sol = _extract_sell_mint(tx, w.address)
+            if sell_mint:
+                self.store.record_sell(SmartSell(
+                    wallet=w.address, label=w.label, token_mint=sell_mint,
+                    ts=ts, sol_value=sell_sol,
+                ))
 
         if latest_sig:
             w.last_processed_sig = latest_sig

@@ -14,6 +14,8 @@ import time
 from config import config
 from dexscreener import DexScreener
 from jupiter import Jupiter, JupiterError, LAMPORTS_PER_SOL
+from rugcheck import RugCheckClient
+from smart_wallets import SmartWalletStore
 from storage import Position, PyramidAdd, Store, TpHit
 from telegram_handler import TelegramHub
 
@@ -21,11 +23,21 @@ log = logging.getLogger(__name__)
 
 
 class Monitor:
-    def __init__(self, ds: DexScreener, jup: Jupiter, store: Store, tg: TelegramHub) -> None:
+    def __init__(
+        self,
+        ds: DexScreener,
+        jup: Jupiter,
+        store: Store,
+        tg: TelegramHub,
+        smart: SmartWalletStore | None = None,
+        rug: RugCheckClient | None = None,
+    ) -> None:
         self.ds = ds
         self.jup = jup
         self.store = store
         self.tg = tg
+        self.smart = smart
+        self.rug = rug
 
     # ---------- Kısmi satış (TP seviyesi) ----------
 
@@ -204,6 +216,94 @@ class Monitor:
         )
         return True
 
+    # ---------- Hold-time exit/safety check'leri ----------
+
+    async def _check_smart_exit(self, pos: Position, price: float) -> bool:
+        if self.smart is None or not config.smart_exit_signals_enabled:
+            return False
+        exits = self.smart.recent_exits_for(pos.base_token)
+        if len(exits) >= 2:
+            wallets_str = ", ".join(
+                f"{e.wallet[:6]}..{e.wallet[-4:]}" for e in exits[:3]
+            )
+            await self._close_all(
+                pos, price,
+                f"smart wallet exodus ({len(exits)}: {wallets_str})",
+            )
+            return True
+        if len(exits) == 1 and pos.trailing_stop_override_pct is None:
+            new_trail = max(5.0, config.trailing_stop / 2)
+            pos.trailing_stop_override_pct = new_trail
+            self.store.update()
+            ew = exits[0].wallet
+            await self.tg.info(
+                f"⚠️ <b>${pos.symbol}</b> — smart wallet çıkış "
+                f"<code>{ew[:6]}..{ew[-4:]}</code> "
+                f"({exits[0].sol_value:.2f} SOL)\n"
+                f"Trailing %{config.trailing_stop:.0f} → %{new_trail:.0f} daraltıldı"
+            )
+        return False
+
+    async def _check_liquidity_drain(
+        self, pos: Position, pair: dict, price: float,
+    ) -> bool:
+        if not config.hold_safety_check_enabled:
+            return False
+        if pos.entry_liquidity_usd is None or pos.entry_liquidity_usd <= 0:
+            return False
+        try:
+            current_liq = float((pair.get("liquidity") or {}).get("usd") or 0)
+        except (TypeError, ValueError):
+            return False
+        if current_liq <= 0:
+            return False
+        drop_pct = (pos.entry_liquidity_usd - current_liq) / pos.entry_liquidity_usd * 100
+        if drop_pct >= config.hold_liq_drain_pct:
+            await self.tg.info(
+                f"🚨 <b>${pos.symbol}</b> — likidite çekildi "
+                f"(<code>${pos.entry_liquidity_usd:,.0f}</code> → "
+                f"<code>${current_liq:,.0f}</code>, -{drop_pct:.0f}%)"
+            )
+            await self._close_all(
+                pos, price, f"liquidity drain -{drop_pct:.0f}%",
+            )
+            return True
+        return False
+
+    async def _check_holder_spike(self, pos: Position, price: float) -> bool:
+        if (
+            not config.hold_safety_check_enabled
+            or self.rug is None
+            or pos.entry_top10_pct is None
+        ):
+            return False
+        now = time.time()
+        if now - pos.last_safety_check_ts < config.hold_safety_check_interval:
+            return False
+        pos.last_safety_check_ts = now
+        self.store.update()
+
+        try:
+            report = await self.rug.check(pos.base_token)
+        except Exception:
+            log.exception("hold-time safety check failed for %s", pos.symbol)
+            return False
+        if report.top10_pct is None:
+            return False
+
+        spike_pp = report.top10_pct - pos.entry_top10_pct
+        if spike_pp >= config.hold_top10_spike_pp:
+            await self.tg.info(
+                f"🚨 <b>${pos.symbol}</b> — top10 holder konsantrasyonu sıçradı "
+                f"(<code>%{pos.entry_top10_pct:.1f}</code> → "
+                f"<code>%{report.top10_pct:.1f}</code>, +{spike_pp:.1f}pp)"
+            )
+            await self._close_all(
+                pos, price, f"top10 holder spike +{spike_pp:.1f}pp",
+            )
+            return True
+        return False
+
     # ---------- Tek bir pozisyon için tick ----------
 
     async def _tick_one(self, pos: Position) -> None:
@@ -227,6 +327,18 @@ class Monitor:
         if price > pos.peak_price_usd:
             pos.peak_price_usd = price
             self.store.update()
+
+        # --- Smart wallet exit signal (en güçlü erken çıkış uyarısı) ---
+        if await self._check_smart_exit(pos, price):
+            return
+
+        # --- Hold-time KATMAN 2: likidite çekilmiş mi ---
+        if await self._check_liquidity_drain(pos, pair, price):
+            return
+
+        # --- Hold-time KATMAN 2: top10 holder sıçraması (her N saniyede bir) ---
+        if await self._check_holder_spike(pos, price):
+            return
 
         pnl_pct = ((price - pos.entry_price_usd) / pos.entry_price_usd) * 100
         drawdown_from_peak = ((pos.peak_price_usd - price) / pos.peak_price_usd) * 100
@@ -253,8 +365,9 @@ class Monitor:
             await self._partial_sell(pos, 1, config.tp1_trigger, config.tp1_sell, price)
             return
 
-        # --- Trailing stop (TP1 sonrası aktif) ---
-        if pos.tp_hits and drawdown_from_peak >= config.trailing_stop:
+        # --- Trailing stop (TP1 sonrası aktif; smart exit signal'i daraltabilir) ---
+        trail_pct = pos.trailing_stop_override_pct or config.trailing_stop
+        if pos.tp_hits and drawdown_from_peak >= trail_pct:
             await self._close_all(pos, price, f"trailing -{drawdown_from_peak:.1f}% from peak")
             return
 

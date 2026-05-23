@@ -318,6 +318,26 @@ cüzdan otomatik disable edilir:
 Yeni kalite hesabı her `WALLET_OUTCOMES_INTERVAL` (default 10dk) bir
 çalışır. Disable olduğunda Telegram'a uyarı düşer.
 
+### Smart wallet exit signals & hold-time safety re-check
+
+Smart wallet polling artık alımları VE satışları yakalıyor. Pozisyon
+açıkken:
+- 2+ smart wallet aynı tokeni `SMART_EXIT_WINDOW_MIN` (30dk) içinde
+  full-exit ederse (sell SOL ≥ buy SOL × 0.8) → **anında kapanış**
+- 1 smart wallet exit yaparsa → trailing yarıya iner (örn %25 → %12.5)
+- Eşleşen buy görmediysek minimum `SMART_EXIT_MIN_SOL` (0.5 SOL) eşiği
+  ile gürültü filtrelenir
+
+Aynı tick'te hold-time KATMAN 2 re-check çalışır:
+- **Likidite drain**: liquidity giriş anına göre `HOLD_LIQ_DRAIN_PCT`
+  (35%) düşerse → kapanış (LP çekiliyor = rug in progress)
+- **Top10 holder spike**: her `HOLD_SAFETY_CHECK_INTERVAL` (5dk) bir
+  RugCheck/Helius tekrar sorgulanır; giriş anındaki top10 oranı
+  `HOLD_TOP10_SPIKE_PP` (8pp) sıçramışsa → kapanış (whale akıması)
+
+Üçü de `HOLD_SAFETY_CHECK_ENABLED=true` / `SMART_EXIT_SIGNALS_ENABLED=true`
+default açık; istenirse env ile kapatılabilir.
+
 ### Otomatik wallet discovery
 
 `DISCOVERY_ENABLED=true` (default) ile bot kendi geçmişinden öğrenir:
