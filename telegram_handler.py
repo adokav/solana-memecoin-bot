@@ -51,11 +51,16 @@ BOT_COMMANDS: list[tuple[str, str]] = [
 ]
 
 # Klavyenin üzerinde sabit duran komut buton grid'i
+# Mantıksal gruplar:
+#   1. satır: anlık durum / sağlık
+#   2. satır: performans + analog karşılaştırma
+#   3. satır: edge bileşenleri (smart wallet + makro)
+#   4. satır: acil kontrol
 PERSISTENT_KEYBOARD = ReplyKeyboardMarkup(
     [
-        ["/status", "/health"],
-        ["/pnl", "/paper"],
-        ["/macro", "/analog"],
+        ["/status", "/health", "/perf"],
+        ["/pnl", "/paper", "/analog"],
+        ["/wallets", "/candidates", "/macro"],
         ["/halt", "/resume"],
     ],
     resize_keyboard=True,

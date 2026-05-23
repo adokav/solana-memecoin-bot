@@ -197,6 +197,9 @@ class Config:
     # --- Makro snapshot (analog backtest arşivi) ---
     macro_snapshot_enabled: bool = field(default_factory=lambda: _bool("MACRO_SNAPSHOT_ENABLED", True))
     macro_snapshot_interval: int = field(default_factory=lambda: _int("MACRO_SNAPSHOT_INTERVAL", 3600))
+    # CoinGecko free tier datacenter IP'lerini bazen rate-limit'liyor.
+    # Demo key (ücretsiz signup) varsa header ile geçer, hata azaltır.
+    coingecko_api_key: str = field(default_factory=lambda: _str("COINGECKO_API_KEY", ""))
     # /analog raporunda kullanılan en benzer N sinyal
     analog_top_n: int = field(default_factory=lambda: _int("ANALOG_TOP_N", 20))
 
