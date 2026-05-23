@@ -39,20 +39,36 @@ class MacroSnapshot:
 
 class MacroCollector:
     def __init__(self, pf: PumpFun | None = None, timeout: float = 10.0) -> None:
+        # CoinGecko free tier bazen datacenter UA'larını reddediyor — browser UA kullan
         self._http = httpx.AsyncClient(
             timeout=timeout,
-            headers={"Accept": "application/json", "User-Agent": "memecoin-bot/1.0"},
+            headers={
+                "Accept": "application/json",
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+                ),
+            },
         )
         self.pf = pf
 
     async def close(self) -> None:
         await self._http.aclose()
 
+    def _cg_headers(self) -> dict:
+        if config.coingecko_api_key:
+            return {"x-cg-demo-api-key": config.coingecko_api_key}
+        return {}
+
     async def _coingecko_global(self) -> dict:
         try:
-            r = await self._http.get("https://api.coingecko.com/api/v3/global")
+            r = await self._http.get(
+                "https://api.coingecko.com/api/v3/global",
+                headers=self._cg_headers(),
+            )
             if r.status_code == 200:
                 return (r.json() or {}).get("data") or {}
+            log.warning("coingecko global -> %d", r.status_code)
         except httpx.HTTPError as e:
             log.warning("coingecko global error: %s", e)
         return {}
@@ -66,12 +82,31 @@ class MacroCollector:
                     "vs_currencies": "usd",
                     "include_24hr_change": "true",
                 },
+                headers=self._cg_headers(),
             )
             if r.status_code == 200:
                 return (r.json() or {}).get("solana") or {}
+            log.warning("coingecko sol -> %d", r.status_code)
         except httpx.HTTPError as e:
             log.warning("coingecko sol error: %s", e)
         return {}
+
+    async def _jupiter_sol_price(self) -> float:
+        """CoinGecko başarısızsa Jupiter Price API fallback (SOL/USD)."""
+        try:
+            r = await self._http.get(
+                "https://api.jup.ag/price/v2",
+                params={"ids": "So11111111111111111111111111111111111111112"},
+            )
+            if r.status_code == 200:
+                data = (r.json() or {}).get("data") or {}
+                sol = data.get("So11111111111111111111111111111111111111112") or {}
+                price = sol.get("price")
+                if price:
+                    return float(price)
+        except (httpx.HTTPError, ValueError, TypeError) as e:
+            log.warning("jupiter price fallback error: %s", e)
+        return 0.0
 
     async def _fear_greed(self) -> dict:
         try:
@@ -99,6 +134,13 @@ class MacroCollector:
             snap.fear_greed_label = str(fg.get("value_classification") or "")
         except (TypeError, ValueError) as e:
             log.warning("macro parse error: %s", e)
+
+        # CoinGecko SOL fiyatı vermediyse Jupiter Price'a düş
+        if snap.sol_price_usd <= 0:
+            jup_price = await self._jupiter_sol_price()
+            if jup_price > 0:
+                snap.sol_price_usd = jup_price
+                log.info("macro: sol_price from jupiter fallback = $%.2f", jup_price)
 
         if self.pf is not None and config.pumpfun_enabled:
             try:
