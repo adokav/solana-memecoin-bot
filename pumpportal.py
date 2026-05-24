@@ -45,9 +45,11 @@ class PumpPortal:
         slippage_pct: int,
         priority_fee_sol: float,
         pool: str = "pump",
+        keypair: Keypair | None = None,
     ) -> bytes:
+        kp = keypair or self.kp
         body = {
-            "publicKey": str(self.kp.pubkey()),
+            "publicKey": str(kp.pubkey()),
             "action": action,
             "mint": mint,
             "amount": amount,
@@ -64,9 +66,12 @@ class PumpPortal:
         # Local mode raw transaction bytes döner
         return r.content
 
-    async def _sign_and_send(self, tx_bytes: bytes) -> str:
+    async def _sign_and_send(
+        self, tx_bytes: bytes, keypair: Keypair | None = None,
+    ) -> str:
+        kp = keypair or self.kp
         tx = VersionedTransaction.from_bytes(tx_bytes)
-        signed = VersionedTransaction(tx.message, [self.kp])
+        signed = VersionedTransaction(tx.message, [kp])
         opts = TxOpts(
             skip_preflight=True,
             preflight_commitment=Confirmed,
@@ -84,13 +89,15 @@ class PumpPortal:
         sol_amount: float,
         slippage_pct: int = 15,
         priority_fee_sol: float = 0.001,
+        keypair: Keypair | None = None,
     ) -> str:
         """Bonding curve'den SOL ile token al. Tx imzası döner."""
         tx_bytes = await self._trade_local(
             "buy", mint, sol_amount, True,
             slippage_pct, priority_fee_sol, "pump",
+            keypair=keypair,
         )
-        return await self._sign_and_send(tx_bytes)
+        return await self._sign_and_send(tx_bytes, keypair=keypair)
 
     async def sell(
         self,
@@ -98,11 +105,13 @@ class PumpPortal:
         percent: float = 100,
         slippage_pct: int = 15,
         priority_fee_sol: float = 0.001,
+        keypair: Keypair | None = None,
     ) -> str:
         """Bonding curve'e token'ı sat (yüzde olarak, %100 = tüm pozisyon)."""
         amount_str = f"{int(percent)}%"
         tx_bytes = await self._trade_local(
             "sell", mint, amount_str, False,
             slippage_pct, priority_fee_sol, "pump",
+            keypair=keypair,
         )
-        return await self._sign_and_send(tx_bytes)
+        return await self._sign_and_send(tx_bytes, keypair=keypair)

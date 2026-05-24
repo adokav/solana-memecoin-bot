@@ -115,10 +115,10 @@ class Jupiter:
 
     # ---------- TX gönderim ----------
 
-    def _swap_body(self, quote_resp: dict) -> dict:
+    def _swap_body(self, quote_resp: dict, user_pubkey) -> dict:
         body: dict = {
             "quoteResponse": quote_resp,
-            "userPublicKey": str(self.kp.pubkey()),
+            "userPublicKey": str(user_pubkey),
             "wrapAndUnwrapSol": True,
             "dynamicComputeUnitLimit": True,
             "prioritizationFeeLamports": {
@@ -132,8 +132,9 @@ class Jupiter:
             body["dynamicSlippage"] = {"maxBps": int(config.dynamic_slippage_max_bps)}
         return body
 
-    async def _build_and_send(self, quote_resp: dict) -> str:
-        body = self._swap_body(quote_resp)
+    async def _build_and_send(self, quote_resp: dict, keypair: Keypair | None = None) -> str:
+        kp = keypair or self.kp
+        body = self._swap_body(quote_resp, kp.pubkey())
         r = await self._http.post(JUP_SWAP, json=body)
         if r.status_code != 200:
             raise JupiterError(f"swap build failed: {r.status_code} {r.text}")
@@ -141,11 +142,11 @@ class Jupiter:
 
         raw = base64.b64decode(tx_b64)
         unsigned = VersionedTransaction.from_bytes(raw)
-        signed = VersionedTransaction(unsigned.message, [self.kp])
+        signed = VersionedTransaction(unsigned.message, [kp])
 
         # Jito path: bundle swap + tip ile validator sıralamasını bypass et
         if self.jito is not None:
-            jito_sig = await self._try_jito_send(signed)
+            jito_sig = await self._try_jito_send(signed, kp)
             if jito_sig is not None:
                 return jito_sig
 
@@ -157,10 +158,13 @@ class Jupiter:
         await self.rpc.confirm_transaction(resp.value, commitment=Confirmed)
         return sig
 
-    async def _try_jito_send(self, signed_swap: VersionedTransaction) -> str | None:
+    async def _try_jito_send(
+        self, signed_swap: VersionedTransaction, keypair: Keypair | None = None,
+    ) -> str | None:
         """Bundle başarılıysa swap signature döner, değilse None (RPC fallback)."""
         if self.jito is None:
             return None
+        kp = keypair or self.kp
         try:
             if not await self.jito.ensure_tip_accounts():
                 log.warning("jito tip accounts unavailable, falling back to RPC")
@@ -171,7 +175,7 @@ class Jupiter:
 
             recent_bh = signed_swap.message.recent_blockhash
             tip_tx = self.jito.build_tip_tx(
-                self.kp,
+                kp,
                 config.jito_tip_lamports,
                 recent_bh,
                 tip_account,
@@ -195,7 +199,10 @@ class Jupiter:
 
     # ---------- High level ----------
 
-    async def buy(self, token_mint: str, sol_amount: float) -> tuple[str, int]:
+    async def buy(
+        self, token_mint: str, sol_amount: float,
+        keypair: Keypair | None = None,
+    ) -> tuple[str, int]:
         """SOL -> token. Dönüş: (tx_sig, alınan_raw_token_miktarı)."""
         lamports = int(sol_amount * LAMPORTS_PER_SOL)
         q = await self.quote(
@@ -205,10 +212,13 @@ class Jupiter:
         if not q:
             raise JupiterError("no route for buy")
         out_amount = int(q["outAmount"])
-        sig = await self._build_and_send(q)
+        sig = await self._build_and_send(q, keypair=keypair)
         return sig, out_amount
 
-    async def sell(self, token_mint: str, token_amount_raw: int) -> tuple[str, int]:
+    async def sell(
+        self, token_mint: str, token_amount_raw: int,
+        keypair: Keypair | None = None,
+    ) -> tuple[str, int]:
         """Token -> SOL (tam tutar). Dönüş: (tx_sig, alınan_lamports)."""
         q = await self.quote(
             token_mint, config.sol_mint, token_amount_raw,
@@ -217,5 +227,5 @@ class Jupiter:
         if not q:
             raise JupiterError("no route for sell")
         out_lamports = int(q["outAmount"])
-        sig = await self._build_and_send(q)
+        sig = await self._build_and_send(q, keypair=keypair)
         return sig, out_lamports

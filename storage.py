@@ -67,6 +67,11 @@ class Position:
     is_pump_pos: bool = False
     # Sizing bandit hangi multiplier seçti — kapanışta arm güncelleme için
     sizing_multiplier: Optional[float] = None
+    # Pozisyonun hangi cüzdandan açıldığı — multi-wallet rotation için
+    wallet_pubkey: Optional[str] = None
+    # Entry anındaki top N holder snapshot — insider exit detection için
+    # [{address, amount, ui_amount}, ...]
+    entry_holders: list[dict] = field(default_factory=list)
 
 
 @dataclass

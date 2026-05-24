@@ -356,11 +356,53 @@ Multiplier'lar: 0.5×, 1.0×, 1.5×, 2.0× (BUY_AMOUNT_SOL üzerinden).
   Tek pool = 0, 3+ pool = 5. Trend tokenlarda 1.2× ağırlıkla (sağlık
   göstergesi); erken'de 0.5× (yeni token tek pool'da normal).
 
-### Multi-wallet rotation (scaffolding)
+### Multi-wallet rotation (gerçek plumbing)
 
-`WALLET_POOL_ENABLED=true` + `WALLET_POOL_KEYS=key1,key2,...` ile aktif
-olur. MEV detection'a karşı rastgele cüzdan seçimi. Şu an scaffolding —
-Jupiter/PumpPortal integration ileride. `/walletpool` ile durum.
+`WALLET_POOL_ENABLED=true` + `WALLET_POOL_KEYS=key1,key2,...` ile aktif.
+- Her buy `pick_for_buy()` ile rastgele cüzdan seçer (load distribution +
+  anti-MEV pattern detection)
+- `Position.wallet_pubkey` saklanır; sell ve pyramid add aynı cüzdandan
+  yapılır
+- Pump pozisyonları ve graduation transition'da da aynı cüzdan
+- `/walletpool` ile durum
+- Default kapalı — küçük operasyonda gerek yok, büyüdükçe açılır
+
+### Cross-DEX price awareness
+
+Yeni screener score componenti `price_consistency` (max 5pt):
+- ≥$1k likiditeli pool'lar arasında max/min fiyat oranı
+- Oran ≤1.01 (%1 fark) → 1.0 (mükemmel)
+- Oran ≥1.10 (%10 fark) → 0.0 (mixed/stale liquidity)
+- Trend profile 1.3× (stale pool = red flag), early 0.8×
+
+### Holder graph snapshot (insider exit detection)
+
+Entry'de `rugcheck.top_holders(mint, n=20)` ile top 20 holder snapshot
+alınır (`Position.entry_holders`). Hold sırasında her safety check
+window'unda (5dk) tekrar çekilir:
+- Entry holder'ından N tanesi (default 3) bakiyesinin ≥%50'sini
+  düşürdüyse → insider exit signal → kapat
+- Genelde fiyat hareketinden önce çalışır (insider'lar bilgi avantajı)
+
+Config: `HOLD_INSIDER_EXIT_MIN_DROP_PCT` (50), `HOLD_INSIDER_EXIT_MIN_WALLETS` (3).
+
+### Web dashboard
+
+`DASHBOARD_ENABLED=true` + `DASHBOARD_TOKEN=xxx` ile aiohttp server açılır.
+- `/?token=xxx` → HTML dashboard (açık pozisyonlar, PnL kartları, pin
+  geçmişi, ML durumu, auto-refresh 30s)
+- `/api/status?token=xxx` → JSON status
+- Render PORT env'i otomatik kullanılır (Web Service mode), yoksa
+  `DASHBOARD_PORT` (10000)
+
+**Render deploy notu:** Bot şu an Background Worker. Dashboard external
+erişim için:
+1. Worker'ı Web Service'e çevir (Render bu durumda PORT env'i veriyor), VEYA
+2. Aynı disk'i (data/) mount eden ayrı bir Web Service oluştur
+
+Worker olarak kalsa bile dashboard local'de bind eder; sorunsuz.
+
+### Pin snapshots (parametre + perf tarihçesi)
 
 ### ML scoring layer
 

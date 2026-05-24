@@ -31,6 +31,7 @@ class Monitor:
         tg: TelegramHub,
         smart: SmartWalletStore | None = None,
         rug: RugCheckClient | None = None,
+        pool=None,
     ) -> None:
         self.ds = ds
         self.jup = jup
@@ -38,6 +39,16 @@ class Monitor:
         self.tg = tg
         self.smart = smart
         self.rug = rug
+        self.pool = pool  # WalletPool veya None
+
+    def _keypair_for(self, pos: Position):
+        """Pozisyonu hangi cüzdan açtıysa onun keypair'ini döner.
+        Pool yoksa None — Jupiter default self.kp kullanır.
+        """
+        if self.pool is None or not pos.wallet_pubkey:
+            return None
+        entry = self.pool.find_by_pubkey(pos.wallet_pubkey)
+        return entry.keypair if entry else None
 
     # ---------- Kısmi satış (TP seviyesi) ----------
 
@@ -56,7 +67,9 @@ class Monitor:
             return
 
         try:
-            sig, lamports_out = await self.jup.sell(pos.base_token, sell_amount)
+            sig, lamports_out = await self.jup.sell(
+                pos.base_token, sell_amount, keypair=self._keypair_for(pos),
+            )
         except JupiterError as e:
             await self.tg.info(f"⚠️ TP{level} satışı başarısız ${pos.symbol}: <code>{e}</code>")
             return
@@ -106,7 +119,9 @@ class Monitor:
             return
 
         try:
-            sig, lamports_out = await self.jup.sell(pos.base_token, pos.remaining_raw)
+            sig, lamports_out = await self.jup.sell(
+                pos.base_token, pos.remaining_raw, keypair=self._keypair_for(pos),
+            )
         except Exception as e:
             log.exception("close-all sell failed")
             await self.tg.info(f"❌ Final satış başarısız ${pos.symbol}: <code>{e}</code>")
@@ -170,7 +185,9 @@ class Monitor:
             return False
 
         try:
-            sig, tokens_bought = await self.jup.buy(pos.base_token, add_sol)
+            sig, tokens_bought = await self.jup.buy(
+                pos.base_token, add_sol, keypair=self._keypair_for(pos),
+            )
         except JupiterError as e:
             await self.tg.info(
                 f"⚠️ Pyramid ekleme başarısız ${pos.symbol}: <code>{e}</code>"
@@ -270,6 +287,56 @@ class Monitor:
             return True
         return False
 
+    async def _check_insider_exit(self, pos: Position, price: float) -> bool:
+        """Entry'deki top holder'lardan N tanesi bakiyesini X% düşürdüyse kapat.
+
+        Insider'lar bilgisel avantaja sahip — koordineli çıkış güçlü bearish.
+        _check_holder_spike ile aynı throttle (last_safety_check_ts) kullanır.
+        """
+        if (
+            not config.hold_safety_check_enabled
+            or self.rug is None
+            or not pos.entry_holders
+        ):
+            return False
+
+        try:
+            current_holders = await self.rug.top_holders(pos.base_token, n=40)
+        except Exception:
+            log.exception("insider exit check fetch failed for %s", pos.symbol)
+            return False
+        if not current_holders:
+            return False
+
+        current_by_addr = {h["address"]: int(h["amount"]) for h in current_holders}
+        exits = 0
+        exiters: list[str] = []
+        for entry in pos.entry_holders:
+            addr = entry.get("address", "")
+            entry_amt = int(entry.get("amount", 0) or 0)
+            if not addr or entry_amt <= 0:
+                continue
+            current_amt = current_by_addr.get(addr, 0)
+            # Current = 0 → ATA kapandı (full exit). Veya küçülmüş ATA.
+            drop_pct = (entry_amt - current_amt) / entry_amt * 100
+            if drop_pct >= config.hold_insider_exit_min_drop_pct:
+                exits += 1
+                exiters.append(addr[:6] + ".." + addr[-4:])
+
+        if exits >= config.hold_insider_exit_min_wallets:
+            exiters_str = ", ".join(exiters[:5])
+            await self.tg.info(
+                f"🚨 <b>${pos.symbol}</b> — insider exit "
+                f"(<code>{exits}/{len(pos.entry_holders)}</code> entry holder "
+                f"≥{config.hold_insider_exit_min_drop_pct:.0f}% düşürdü)\n"
+                f"Çıkanlar: <code>{exiters_str}</code>"
+            )
+            await self._close_all(
+                pos, price, f"insider exit ({exits} wallets)",
+            )
+            return True
+        return False
+
     async def _check_holder_spike(self, pos: Position, price: float) -> bool:
         if (
             not config.hold_safety_check_enabled
@@ -336,8 +403,11 @@ class Monitor:
         if await self._check_liquidity_drain(pos, pair, price):
             return
 
-        # --- Hold-time KATMAN 2: top10 holder sıçraması (her N saniyede bir) ---
+        # --- Hold-time KATMAN 2: insider exit (entry holder'ları satıyor mu) ---
+        # _check_holder_spike ile aynı throttle pencerelidir
         if await self._check_holder_spike(pos, price):
+            return
+        if await self._check_insider_exit(pos, price):
             return
 
         pnl_pct = ((price - pos.entry_price_usd) / pos.entry_price_usd) * 100

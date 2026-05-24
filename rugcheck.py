@@ -179,6 +179,27 @@ class RugCheckClient:
 
     # ---------- Helius DAS holder dağılımı ----------
 
+    async def top_holders(self, mint: str, n: int = 20) -> list[dict]:
+        """Top N holder'ı [{address, amount, ui_amount}, ...] olarak döner.
+
+        Hold-time insider exit detection için. Boş liste hata = sessizce skip.
+        """
+        raw = await self._helius_holders(mint)
+        if not raw or not isinstance(raw, dict):
+            return []
+        value = raw.get("value") or []
+        out: list[dict] = []
+        for v in value[:n]:
+            try:
+                out.append({
+                    "address": str(v.get("address", "")),
+                    "amount": int(v.get("amount", 0) or 0),
+                    "ui_amount": float(v.get("uiAmount") or 0),
+                })
+            except (TypeError, ValueError):
+                continue
+        return out
+
     async def _helius_holders(self, mint: str) -> dict | None:
         if not config.helius_api_key:
             return None
