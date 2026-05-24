@@ -218,6 +218,18 @@ class Config:
     prepump_min_velocity_per_hour: float = field(default_factory=lambda: _float("PREPUMP_MIN_VELOCITY_PER_HOUR", 10))
     prepump_min_mc_usd: float = field(default_factory=lambda: _float("PREPUMP_MIN_MC_USD", 30000))
 
+    # --- PumpPortal: bonding curve direkt trade ---
+    pumpportal_enabled: bool = field(default_factory=lambda: _bool("PUMPPORTAL_ENABLED", False))
+    pumpportal_buy_amount_sol: float = field(default_factory=lambda: _float("PUMPPORTAL_BUY_AMOUNT_SOL", 0.01))
+    pumpportal_slippage_pct: int = field(default_factory=lambda: _int("PUMPPORTAL_SLIPPAGE_PCT", 15))
+    pumpportal_priority_fee_sol: float = field(default_factory=lambda: _float("PUMPPORTAL_PRIORITY_FEE_SOL", 0.001))
+    # Pump pozisyon monitor — interval (DS price feed yerine pump.fun reserves'tan)
+    pump_monitor_interval: int = field(default_factory=lambda: _int("PUMP_MONITOR_INTERVAL", 30))
+
+    # --- LunarCrush social analytics ---
+    lunarcrush_enabled: bool = field(default_factory=lambda: _bool("LUNARCRUSH_ENABLED", True))
+    lunarcrush_api_key: str = field(default_factory=lambda: _str("LUNARCRUSH_API_KEY", ""))
+
     # --- Kaynak + skor: Smart wallet tracking ---
     smart_wallets_enabled: bool = field(default_factory=lambda: _bool("SMART_WALLETS_ENABLED", True))
     # İlk run'da dosya yoksa env'den seed: "addr1:label1,addr2:label2,..."

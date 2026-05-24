@@ -63,6 +63,8 @@ class Position:
     entry_liquidity_usd: Optional[float] = None
     entry_top10_pct: Optional[float] = None
     last_safety_check_ts: float = 0.0
+    # Pump.fun bonding curve pozisyonu — farklı price feed + farklı sell yolu
+    is_pump_pos: bool = False
 
 
 @dataclass

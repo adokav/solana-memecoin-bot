@@ -136,3 +136,22 @@ class PumpFun:
             if coin and not coin.complete:
                 coins.append(coin)
         return coins
+
+    async def coin_info(self, mint: str) -> dict | None:
+        """Tek bir coin'in canlı state'i — pump position monitor için.
+
+        Önemli alanlar:
+          - complete: graduate olmuş mu
+          - virtual_sol_reserves / virtual_token_reserves: anlık fiyat
+          - usd_market_cap, reply_count
+        """
+        try:
+            r = await self._http.get(f"{BASE}/coins/{mint}")
+            if r.status_code != 200:
+                log.debug("pump.fun coin %s -> %d", mint[:8], r.status_code)
+                return None
+            data = r.json()
+            return data if isinstance(data, dict) else None
+        except (httpx.HTTPError, ValueError) as e:
+            log.warning("pump.fun coin %s error: %s", mint[:8], e)
+            return None

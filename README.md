@@ -318,6 +318,34 @@ cüzdan otomatik disable edilir:
 Yeni kalite hesabı her `WALLET_OUTCOMES_INTERVAL` (default 10dk) bir
 çalışır. Disable olduğunda Telegram'a uyarı düşer.
 
+### PumpPortal bonding curve trading
+
+`PUMPPORTAL_ENABLED=true` ile aktif. Pre-grad alert'lara `🐸 AL via
+PumpPortal` butonu eklenir. Buton tıklanınca bot PumpPortal local-mode
+API'sinden unsigned tx alır, lokalde imzalar, RPC'ye gönderir. 1%
+PumpPortal trading fee tx'in içinde.
+
+Pump pozisyonları özel monitor loop'ta tutulur:
+- Fiyat pump.fun `virtual_sol_reserves / virtual_token_reserves`'tan
+- TP partial yok (bonding curve likiditesi ince) — sadece trailing + SL
+- Token graduate olunca otomatik full exit (pump.fun sell aksi halde
+  çalışmaz, Raydium'a göç eder)
+
+Config:
+- `PUMPPORTAL_BUY_AMOUNT_SOL` (0.01)
+- `PUMPPORTAL_SLIPPAGE_PCT` (15) — bonding curve thin, daha yüksek
+- `PUMPPORTAL_PRIORITY_FEE_SOL` (0.001)
+- `PUMP_MONITOR_INTERVAL` (30s)
+
+### LunarCrush sosyal sinyali
+
+`LUNARCRUSH_API_KEY` set edilirse top adaylar için coin metrics
+sorgulanır (galaxy_score, alt_rank, social_volume). 1 saat cache.
+Skor sistemine `social_external` componenti eklenir — galaxy_score 0-100
+→ max 15 puan (profile-aware ağırlık). Trend'de 1.3× weight (oturmuş
+projeler LunarCrush'ta tracked), early'de 0.9× (yeni memecoin coverage
+zayıf).
+
 ### Pump.fun pre-graduation alert (sosyal velocity ile)
 
 Bot direkt bonding curve trade edemez (Jupiter route yok), ama yaklaşan

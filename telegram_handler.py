@@ -27,8 +27,13 @@ log = logging.getLogger(__name__)
 # Onay bekleyen fırsatlar: callback_key -> (Candidate, SafetyReport)
 _pending: dict[str, tuple[Candidate, SafetyReport]] = {}
 
+# Pre-grad pump fırsatları: callback_key -> (mint, symbol, sol_amount)
+_pending_pump: dict[str, tuple[str, str, float]] = {}
+
 BuyCallback = Callable[[Candidate, SafetyReport], Awaitable[None]]
+PumpBuyCallback = Callable[[str, str, float], Awaitable[None]]
 _on_buy: BuyCallback | None = None
+_on_pump_buy: PumpBuyCallback | None = None
 
 
 # Telegram menu button'u için (yazma alanının yanındaki ikon)
@@ -71,6 +76,11 @@ PERSISTENT_KEYBOARD = ReplyKeyboardMarkup(
 def set_buy_callback(cb: BuyCallback) -> None:
     global _on_buy
     _on_buy = cb
+
+
+def set_pump_buy_callback(cb: PumpBuyCallback) -> None:
+    global _on_pump_buy
+    _on_pump_buy = cb
 
 
 def _confidence_emoji(score: float) -> str:
@@ -334,6 +344,45 @@ class TelegramHub:
         q = update.callback_query
         await q.answer()
         action, _, key = q.data.partition(":")
+
+        # Pre-grad pump butonları
+        if action in ("pumpbuy", "pumpskip"):
+            pump_item = _pending_pump.pop(key, None)
+            if not pump_item:
+                try:
+                    await q.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+                await q.message.reply_text("⌛ Bu pre-grad fırsatının süresi geçti.")
+                return
+            mint, symbol, sol_amount = pump_item
+            if action == "pumpskip":
+                await q.edit_message_text(
+                    q.message.text_html + "\n\n❌ <i>Atlandı.</i>",
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+                return
+            # pumpbuy
+            await q.edit_message_text(
+                q.message.text_html + "\n\n⏳ <i>PumpPortal alımı gönderiliyor...</i>",
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            if _on_pump_buy is None:
+                await q.message.reply_text("⚠️ Pump-buy callback bağlı değil.")
+                return
+            try:
+                await _on_pump_buy(mint, symbol, sol_amount)
+            except Exception as e:
+                log.exception("pump-buy callback error")
+                await q.message.reply_text(
+                    f"❌ Pump alım hatası: <code>{e}</code>",
+                    parse_mode=ParseMode.HTML,
+                )
+            return
+
+        # Klasik (Raydium) alım butonları
         item = _pending.pop(key, None)
         if not item:
             try:
@@ -380,6 +429,27 @@ class TelegramHub:
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
             reply_markup=_keyboard(key),
+        )
+
+    async def pump_alert(
+        self, mint: str, symbol: str, text: str, sol_amount: float,
+    ) -> None:
+        """Pre-grad pump alert — PumpPortal üzerinden satın alma butonuyla."""
+        key = f"pump-{mint[:16]}-{int(time.time())}"
+        _pending_pump[key] = (mint, symbol, sol_amount)
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                f"🐸 AL via PumpPortal ({sol_amount} SOL)",
+                callback_data=f"pumpbuy:{key}",
+            ),
+            InlineKeyboardButton("❌ Geç", callback_data=f"pumpskip:{key}"),
+        ]])
+        await self.app.bot.send_message(
+            chat_id=self._chat_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=keyboard,
         )
 
     async def info(self, text: str, with_keyboard: bool = False) -> None:
