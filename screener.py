@@ -202,7 +202,9 @@ PROFILE_WEIGHTS = {
         "holder_health": 1.0,
         "smart_signal": 1.1,   # erken aşamada smart wallet alımı çok kıymetli
         "social_external": 0.9,  # yeni tokenlarda LunarCrush coverage zayıf
-        "ml_predicted": 1.0,     # ML zaten profile feature'ını kullanıyor
+        "ml_predicted": 1.0,
+        "buy_velocity": 1.3,   # erken aşamada accumulation güçlü sinyal
+        "liq_dispersion": 0.5, # yeni token tek pool'da normal, az ağırlık
     },
     "trend": {
         "momentum": 0.9,
@@ -216,6 +218,8 @@ PROFILE_WEIGHTS = {
         "smart_signal": 1.0,
         "social_external": 1.3,  # trend için LunarCrush coverage iyi, yüksek ağırlık
         "ml_predicted": 1.0,
+        "buy_velocity": 1.0,
+        "liq_dispersion": 1.2, # trend tokenda çok pool = sağlık
     },
 }
 
@@ -229,7 +233,12 @@ def _apply_profile_weights(breakdown: dict, profile: str) -> dict:
     return {k: round(v * weights.get(k, 1.0), 1) for k, v in breakdown.items()}
 
 
-def _score(c: Candidate, smart_weight: float = 0.0) -> tuple[float, dict]:
+def _score(
+    c: Candidate,
+    smart_weight: float = 0.0,
+    buy_velocity: float = 0.0,
+    liq_dispersion: float = 0.0,
+) -> tuple[float, dict]:
     breakdown: dict = {}
 
     # Momentum (max 25)
@@ -310,6 +319,20 @@ def _score(c: Candidate, smart_weight: float = 0.0) -> tuple[float, dict]:
         smart_signal = min(25.0, smart_weight * 7.0 + 1.0)
     breakdown["smart_signal"] = round(smart_signal, 1)
 
+    # Buy ratio velocity (max 10) — kısa zamanda alıcı oranı artıyor mu
+    # Pozitif velocity = artan alım baskısı = bullish accumulation
+    # >0.05 = saatte +5pp artış → tam puan
+    bv_score = 0.0
+    if buy_velocity > 0:
+        bv_score = min(10.0, buy_velocity * 200)
+    breakdown["buy_velocity"] = round(bv_score, 1)
+
+    # Liquidity dispersion (max 5) — kaç pool'da dağılmış
+    # 1 pool = 0, 2 pool = 2.5, 3+ pool = 5 (kademe ile)
+    # Dağınık likidite = daha olgun token, daha az "rug riski"
+    ld_score = min(5.0, liq_dispersion)
+    breakdown["liq_dispersion"] = round(ld_score, 1)
+
     # Profile-aware ağırlıklar (varsa)
     breakdown = _apply_profile_weights(breakdown, c.profile)
     total = sum(breakdown.values())
@@ -336,6 +359,8 @@ class Screener:
         self._cooldown: dict[str, tuple[float, float]] = {}
         # {base_token: [(ts, liquidity_usd), ...]}  son N dakikadaki likidite snapshot'ları
         self._liq_history: dict[str, list[tuple[float, float]]] = {}
+        # {base_token: [(ts, buy_ratio), ...]}  buy ratio velocity için
+        self._buy_ratio_history: dict[str, list[tuple[float, float]]] = {}
 
     def _record_liquidity(self, token: str, liq: float) -> None:
         now = time.time()
@@ -356,6 +381,43 @@ class Screener:
         if peak <= 0:
             return None
         return (peak - current_liq) / peak * 100
+
+    def _record_buy_ratio(self, token: str, ratio: float) -> None:
+        now = time.time()
+        cutoff = now - 30 * 60  # 30dk sliding window
+        hist = [(ts, r) for ts, r in self._buy_ratio_history.get(token, []) if ts > cutoff]
+        hist.append((now, ratio))
+        self._buy_ratio_history[token] = hist
+
+    def _buy_ratio_velocity(self, token: str) -> float:
+        """Saatte buy ratio değişimi (pp/saat). Pozitif = artıyor (bullish)."""
+        hist = self._buy_ratio_history.get(token) or []
+        if len(hist) < 2:
+            return 0.0
+        ts_first, r_first = hist[0]
+        ts_last, r_last = hist[-1]
+        elapsed_h = (ts_last - ts_first) / 3600
+        if elapsed_h < 0.05:  # min 3 dakika ölçüm
+            return 0.0
+        return (r_last - r_first) / elapsed_h
+
+    @staticmethod
+    def _compute_liq_dispersion(pairs: list[dict]) -> float:
+        """Likidite kaç farklı pool'a yayılmış? 0=tek pool, 5=çok pool."""
+        if not pairs:
+            return 0.0
+        # En az 1k$ likiditesi olan pool'ları say
+        active_pools = sum(
+            1 for p in pairs
+            if float((p.get("liquidity") or {}).get("usd") or 0) >= 1000
+        )
+        if active_pools <= 1:
+            return 0.0
+        if active_pools == 2:
+            return 2.5
+        if active_pools == 3:
+            return 4.0
+        return 5.0
 
     def _cooldown_hours_for(self, score: float) -> float:
         if score >= config.high_confidence_score:
@@ -484,7 +546,23 @@ class Screener:
             smart_weight = 0.0
             if self.smart is not None and config.smart_wallets_enabled:
                 smart_weight = self.smart.weighted_smart_signal(c.base_token)
-            score, breakdown = _score(c, smart_weight=smart_weight)
+
+            # Buy ratio velocity: kısa sürede alıcı oranı değişim hızı
+            current_buy_ratio = (
+                c.buys_h1 / c.txns_h1 if c.txns_h1 > 0 else 0.0
+            )
+            self._record_buy_ratio(c.base_token, current_buy_ratio)
+            buy_velocity = self._buy_ratio_velocity(c.base_token)
+
+            # Liquidity dispersion: kaç pool'da likidite var
+            liq_dispersion = self._compute_liq_dispersion(pairs)
+
+            score, breakdown = _score(
+                c,
+                smart_weight=smart_weight,
+                buy_velocity=buy_velocity,
+                liq_dispersion=liq_dispersion,
+            )
             c.score = score
             c.score_breakdown = breakdown
 

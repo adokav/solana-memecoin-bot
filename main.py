@@ -34,6 +34,14 @@ except Exception:
     _ML_OK = False
 from monitor import Monitor
 from paper import PaperMonitor, PaperStore
+from pin import (
+    create_pin,
+    find_pin,
+    format_diff,
+    format_pin_detail,
+    format_pins_list,
+    list_pins,
+)
 from pnl import format_report, summarize
 from prepump import PrePumpDetector, format_prepump_alert
 from pumpfun import PUMP_GRADUATION_MC_USD, PumpFun
@@ -42,6 +50,12 @@ from rugcheck import RugCheckClient, SafetyReport
 from screener import Candidate, Screener
 from signal_log import SignalLog
 from sizing import size_for_candidate
+from sizing_bandit import (
+    BanditStore,
+    choose_sizing as bandit_choose_sizing,
+    format_bandit_status,
+    update_from_position as bandit_update_from_position,
+)
 from smart_wallets import (
     SmartWalletStore,
     SmartWalletTracker,
@@ -57,6 +71,7 @@ from wallet_discovery import (
 from storage import Position, Store
 from telegram_handler import TelegramHub, set_buy_callback, set_pump_buy_callback
 from wallet import load_keypair
+from wallet_pool import WalletPool, format_pool_status
 
 logging.basicConfig(
     level=logging.INFO,
@@ -68,6 +83,8 @@ log = logging.getLogger("main")
 class Bot:
     def __init__(self) -> None:
         kp = load_keypair()
+        self.wallet_pool = WalletPool(kp)
+        self.bandit_store = BanditStore.load()
         self.ds = DexScreener()
         self.pf = PumpFun() if config.pumpfun_enabled else None
         self.prepump: PrePumpDetector | None = (
@@ -179,14 +196,29 @@ class Bot:
             )
             return
 
-        # Adaptive sizing: paper verisinden skor bucket çarpanı (kapalıysa flat)
+        # Sizing: bandit önce, kapalıysa adaptive_sizing, o da kapalıysa flat
         paper_positions = self.paper_store.positions if self.paper_store else None
-        buy_amount, size_note = size_for_candidate(
-            c.score + safety.score, paper_positions, config.buy_amount_sol,
-        )
+        chosen_multiplier: float | None = None
+        if config.sizing_bandit_enabled:
+            total_score = c.score + safety.score
+            sized, size_note, mult = bandit_choose_sizing(
+                total_score, c.profile, paper_positions,
+                config.buy_amount_sol, self.bandit_store,
+            )
+            buy_amount = sized
+            chosen_multiplier = mult
+        else:
+            buy_amount, size_note = size_for_candidate(
+                c.score + safety.score, paper_positions, config.buy_amount_sol,
+            )
+            # adaptive_sizing flat ise multiplier 1.0
+            chosen_multiplier = (
+                buy_amount / config.buy_amount_sol if config.buy_amount_sol > 0 else 1.0
+            )
+
         if buy_amount <= 0:
             await self.tg.info(
-                f"⏭ <b>${c.base_symbol}</b> pas — adaptive size 0\n"
+                f"⏭ <b>${c.base_symbol}</b> pas — size 0\n"
                 f"<i>{size_note}</i>"
             )
             return
@@ -227,6 +259,7 @@ class Bot:
             entry_liquidity_usd=c.liquidity_usd,
             entry_top10_pct=safety.top10_pct,
             last_safety_check_ts=time.time(),
+            sizing_multiplier=chosen_multiplier,
         )
         self.store.add(pos)
 
@@ -553,6 +586,36 @@ class Bot:
             await self._pump_close_all(pos, price, f"SL {pnl_pct:.1f}%")
             return
 
+    # ---------- Loop: otomatik pin snapshot ----------
+
+    async def auto_pin_loop(self) -> None:
+        # Boot'tan 30dk sonra başla, sonra her PIN_AUTO_INTERVAL_HOURS saatte bir
+        await asyncio.sleep(1800)
+        while not self._stop.is_set():
+            if config.pin_auto_enabled:
+                try:
+                    paper_pos = (
+                        self.paper_store.positions
+                        if self.paper_store else None
+                    )
+                    name = f"auto_{time.strftime('%Y%m%d_%H%M', time.gmtime())}"
+                    pin = create_pin(
+                        name=name,
+                        real_positions=self.store.positions,
+                        paper_positions=paper_pos,
+                        notes="otomatik haftalık snapshot",
+                        by="auto",
+                    )
+                    real_n = pin.perf_snapshot.get("real_all_time", {}).get("total", 0)
+                    paper_n = pin.perf_snapshot.get("paper_all_time", {}).get("total", 0)
+                    log.info(
+                        "auto-pin: %s real=%d paper=%d",
+                        name, real_n, paper_n,
+                    )
+                except Exception:
+                    log.exception("auto-pin error")
+            await asyncio.sleep(config.pin_auto_interval_hours * 3600)
+
     # ---------- Loop: pump position monitor ----------
 
     async def pump_monitor_loop(self) -> None:
@@ -657,6 +720,57 @@ class Bot:
         if not _ML_OK:
             return "⚠️ ML kütüphaneleri yüklü değil (scikit-learn)."
         return format_ml_status(self.ml_bundle)
+
+    # ---------- /pin, /pins, /bandit, /wallets_pool ----------
+
+    async def pin_text(self, arg: str) -> str:
+        """
+        Kullanım:
+          /pin                    → liste
+          /pin <ad>               → snapshot al
+          /pin show <ad>          → detay
+          /pin diff <a> <b>       → karşılaştır
+        """
+        arg = (arg or "").strip()
+        if not arg:
+            return format_pins_list(list_pins())
+
+        tokens = arg.split()
+        sub = tokens[0]
+
+        if sub == "show" and len(tokens) >= 2:
+            p = find_pin(tokens[1])
+            if not p:
+                return f"⚠️ Pin yok: <code>{tokens[1]}</code>"
+            return format_pin_detail(p)
+
+        if sub == "diff" and len(tokens) >= 3:
+            a = find_pin(tokens[1])
+            b = find_pin(tokens[2])
+            if not a:
+                return f"⚠️ Pin yok: <code>{tokens[1]}</code>"
+            if not b:
+                return f"⚠️ Pin yok: <code>{tokens[2]}</code>"
+            return format_diff(a, b)
+
+        # Yeni pin oluştur
+        name = tokens[0]
+        notes = " ".join(tokens[1:]) if len(tokens) > 1 else ""
+        paper_pos = self.paper_store.positions if self.paper_store else None
+        pin = create_pin(
+            name=name,
+            real_positions=self.store.positions,
+            paper_positions=paper_pos,
+            notes=notes,
+            by="manual",
+        )
+        return f"📌 Pin oluşturuldu: <b>{pin.name}</b>"
+
+    async def bandit_text(self) -> str:
+        return format_bandit_status(self.bandit_store)
+
+    async def walletpool_text(self) -> str:
+        return format_pool_status(self.wallet_pool)
 
     # ---------- /status ----------
 
@@ -823,9 +937,24 @@ class Bot:
     # ---------- Loop: pozisyon takibi ----------
 
     async def monitor_loop(self) -> None:
+        prev_closed_pairs: set[str] = {
+            p.pair_address for p in self.store.positions if p.status == "closed"
+        }
         while not self._stop.is_set():
             try:
                 await self.monitor.tick()
+                # Bandit: yeni kapanan pozisyonları kaydet (sizing_multiplier varsa)
+                if config.sizing_bandit_enabled:
+                    for p in self.store.positions:
+                        if p.status != "closed":
+                            continue
+                        if p.pair_address in prev_closed_pairs:
+                            continue
+                        prev_closed_pairs.add(p.pair_address)
+                        try:
+                            bandit_update_from_position(self.bandit_store, p)
+                        except Exception:
+                            log.exception("bandit update failed for %s", p.symbol)
                 # Pozisyon kapanmış olabilir → devre kesici eşiklerini değerlendir
                 halted_now, reason = self.breaker.check_post_close(self.store.positions)
                 if halted_now:
@@ -1046,6 +1175,9 @@ class Bot:
         self.tg.set_candidates_callback(self.candidates_text)
         self.tg.set_train_callback(self.train_text)
         self.tg.set_mlstatus_callback(self.mlstatus_text)
+        self.tg.set_pin_callback(self.pin_text)
+        self.tg.set_bandit_callback(self.bandit_text)
+        self.tg.set_walletpool_callback(self.walletpool_text)
 
         await self.tg.start()
         await self.tg.info(
@@ -1085,6 +1217,8 @@ class Bot:
             tasks.append(asyncio.create_task(self.prepump_loop(), name="prepump"))
         if self.pumpportal is not None:
             tasks.append(asyncio.create_task(self.pump_monitor_loop(), name="pump_monitor"))
+        if config.pin_auto_enabled:
+            tasks.append(asyncio.create_task(self.auto_pin_loop(), name="auto_pin"))
 
         await self._stop.wait()
         log.info("shutting down...")
