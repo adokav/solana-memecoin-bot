@@ -55,6 +55,9 @@ BOT_COMMANDS: list[tuple[str, str]] = [
     ("candidates", "Otomatik keşfedilen aday wallet'ları göster"),
     ("train", "ML modelini paper + real kapanan trade'lerden eğit"),
     ("mlstatus", "ML model durumu (sample, accuracy)"),
+    ("pin", "Parametre + perf snapshot (örn /pin v2_after_smart)"),
+    ("bandit", "Thompson sampling sizing arm durumları"),
+    ("walletpool", "Multi-wallet pool durumu"),
 ]
 
 # Klavyenin üzerinde sabit duran komut buton grid'i
@@ -176,6 +179,9 @@ class TelegramHub:
         self.app.add_handler(CommandHandler("candidates", self._candidates_cmd))
         self.app.add_handler(CommandHandler("train", self._train_cmd))
         self.app.add_handler(CommandHandler("mlstatus", self._mlstatus_cmd))
+        self.app.add_handler(CommandHandler("pin", self._pin_cmd))
+        self.app.add_handler(CommandHandler("bandit", self._bandit_cmd))
+        self.app.add_handler(CommandHandler("walletpool", self._walletpool_cmd))
         self.app.add_handler(CallbackQueryHandler(self._on_button))
         self._status_cb: Callable[[], Awaitable[str]] | None = None
         self._health_cb: Callable[[], Awaitable[str]] | None = None
@@ -193,6 +199,9 @@ class TelegramHub:
         self._candidates_cb: Callable[[], Awaitable[str]] | None = None
         self._train_cb: Callable[[], Awaitable[str]] | None = None
         self._mlstatus_cb: Callable[[], Awaitable[str]] | None = None
+        self._pin_cb: Callable[[str], Awaitable[str]] | None = None
+        self._bandit_cb: Callable[[], Awaitable[str]] | None = None
+        self._walletpool_cb: Callable[[], Awaitable[str]] | None = None
         self._chat_id = config.telegram_chat_id
 
     def set_status_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
@@ -242,6 +251,15 @@ class TelegramHub:
 
     def set_mlstatus_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
         self._mlstatus_cb = cb
+
+    def set_pin_callback(self, cb: Callable[[str], Awaitable[str]]) -> None:
+        self._pin_cb = cb
+
+    def set_bandit_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
+        self._bandit_cb = cb
+
+    def set_walletpool_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
+        self._walletpool_cb = cb
 
     async def _start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
@@ -358,6 +376,19 @@ class TelegramHub:
 
     async def _mlstatus_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         text = await self._mlstatus_cb() if self._mlstatus_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def _pin_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        arg = " ".join(ctx.args) if ctx.args else ""
+        text = await self._pin_cb(arg) if self._pin_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def _bandit_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        text = await self._bandit_cb() if self._bandit_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def _walletpool_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        text = await self._walletpool_cb() if self._walletpool_cb else "Hazır değil."
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def _on_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

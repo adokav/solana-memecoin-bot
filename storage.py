@@ -65,6 +65,8 @@ class Position:
     last_safety_check_ts: float = 0.0
     # Pump.fun bonding curve pozisyonu — farklı price feed + farklı sell yolu
     is_pump_pos: bool = False
+    # Sizing bandit hangi multiplier seçti — kapanışta arm güncelleme için
+    sizing_multiplier: Optional[float] = None
 
 
 @dataclass

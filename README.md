@@ -318,6 +318,50 @@ cüzdan otomatik disable edilir:
 Yeni kalite hesabı her `WALLET_OUTCOMES_INTERVAL` (default 10dk) bir
 çalışır. Disable olduğunda Telegram'a uyarı düşer.
 
+### Pin snapshots (parametre + perf tarihçesi)
+
+`PIN_AUTO_ENABLED=true` (default) → her `PIN_AUTO_INTERVAL_HOURS` (168 =
+haftalık) bir otomatik snapshot. Manuel: `/pin <ad> [notlar]`.
+
+- `data/pins.jsonl` — append-only
+- 40+ tunable parametre + 7g/all-time perf metrikleri saklanır
+- `/pin` — liste
+- `/pin show <ad>` — detay
+- `/pin diff <a> <b>` — config + perf farkları
+
+Veri biriktikçe parametre revizyonu için referans noktası: önceki
+versiyona göre WR ve net SOL nasıl değişmiş, hangi config'i değiştirdik?
+
+### Thompson sampling sizing bandit
+
+`SIZING_BANDIT_ENABLED=true` (default kapalı) → mevcut adaptive_sizing'in
+yerine online RL geçer. Her `(profile, score_bucket, multiplier)` için
+Beta(α, β) distribution tutar. Karar verirken her arm'dan sample alır,
+en yüksek olanı seçer (Thompson sampling). Pozisyon kapandığında
+ilgili arm güncellenir.
+
+Avantaj:
+- Yeterli sample yokken bile keşfeder (epsilon-greedy değil — Bayesian)
+- Online — manuel re-train yok
+- `/bandit` ile her arm'ın WR tahmini görülür
+
+Multiplier'lar: 0.5×, 1.0×, 1.5×, 2.0× (BUY_AMOUNT_SOL üzerinden).
+
+### Volume signals — buy ratio velocity + liq dispersion
+
+İki yeni screener score componenti:
+- **buy_velocity** (max 10pt): son 30dk'da buy_ratio'nun saatlik değişim
+  hızı. Pozitif = bullish accumulation. Erken aşamada 1.3× ağırlıkla.
+- **liq_dispersion** (max 5pt): kaç farklı pool'da ≥$1k likidite var.
+  Tek pool = 0, 3+ pool = 5. Trend tokenlarda 1.2× ağırlıkla (sağlık
+  göstergesi); erken'de 0.5× (yeni token tek pool'da normal).
+
+### Multi-wallet rotation (scaffolding)
+
+`WALLET_POOL_ENABLED=true` + `WALLET_POOL_KEYS=key1,key2,...` ile aktif
+olur. MEV detection'a karşı rastgele cüzdan seçimi. Şu an scaffolding —
+Jupiter/PumpPortal integration ileride. `/walletpool` ile durum.
+
 ### ML scoring layer
 
 `ML_ENABLED=true` (default) ile aktif olur, ama model **eğitildiğinde**

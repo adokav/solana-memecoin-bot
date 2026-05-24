@@ -182,6 +182,19 @@ class Config:
     adaptive_sizing_enabled: bool = field(default_factory=lambda: _bool("ADAPTIVE_SIZING_ENABLED", False))
     adaptive_sizing_min_samples: int = field(default_factory=lambda: _int("ADAPTIVE_SIZING_MIN_SAMPLES", 5))
 
+    # --- Thompson sampling sizing bandit (online RL) ---
+    # SIZING_BANDIT_ENABLED + ADAPTIVE_SIZING_ENABLED ikisi açıksa bandit öncelikli
+    sizing_bandit_enabled: bool = field(default_factory=lambda: _bool("SIZING_BANDIT_ENABLED", False))
+
+    # --- Pin snapshots ---
+    pin_auto_enabled: bool = field(default_factory=lambda: _bool("PIN_AUTO_ENABLED", True))
+    pin_auto_interval_hours: int = field(default_factory=lambda: _int("PIN_AUTO_INTERVAL_HOURS", 168))  # haftalık
+
+    # --- Multi-wallet rotation ---
+    wallet_pool_enabled: bool = field(default_factory=lambda: _bool("WALLET_POOL_ENABLED", False))
+    # Ek cüzdanların private key'leri virgülle ayrılmış (ana cüzdan WALLET_PRIVATE_KEY)
+    wallet_pool_keys: str = field(default_factory=lambda: _str("WALLET_POOL_KEYS", ""))
+
     # --- Pyramid / DCA (TP1 sonrası kazanan trende ekleme) ---
     # Default kapalı — riskli, paper'da kazanan strateji görüldükten sonra aç
     pyramid_enabled: bool = field(default_factory=lambda: _bool("PYRAMID_ENABLED", False))
