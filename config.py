@@ -195,6 +195,14 @@ class Config:
     # Ek cüzdanların private key'leri virgülle ayrılmış (ana cüzdan WALLET_PRIVATE_KEY)
     wallet_pool_keys: str = field(default_factory=lambda: _str("WALLET_POOL_KEYS", ""))
 
+    # --- Web dashboard ---
+    dashboard_enabled: bool = field(default_factory=lambda: _bool("DASHBOARD_ENABLED", False))
+    dashboard_port: int = field(default_factory=lambda: _int("DASHBOARD_PORT", 10000))
+    # Render PORT env'i set ederse onu kullan
+    dashboard_render_port: str = field(default_factory=lambda: _str("PORT", ""))
+    # Token auth — URL'de ?token=XXX olarak gelmeli
+    dashboard_token: str = field(default_factory=lambda: _str("DASHBOARD_TOKEN", ""))
+
     # --- Pyramid / DCA (TP1 sonrası kazanan trende ekleme) ---
     # Default kapalı — riskli, paper'da kazanan strateji görüldükten sonra aç
     pyramid_enabled: bool = field(default_factory=lambda: _bool("PYRAMID_ENABLED", False))
@@ -275,6 +283,10 @@ class Config:
     hold_liq_drain_pct: float = field(default_factory=lambda: _float("HOLD_LIQ_DRAIN_PCT", 35))
     # Top10 holder konsantrasyonu pp olarak bu kadar sıçrarsa whale alımı/insider → kapat
     hold_top10_spike_pp: float = field(default_factory=lambda: _float("HOLD_TOP10_SPIKE_PP", 8))
+
+    # Insider exit detection: entry holder'larından N kadarı bakiyesinin X%'ini düşürürse kapat
+    hold_insider_exit_min_drop_pct: float = field(default_factory=lambda: _float("HOLD_INSIDER_EXIT_MIN_DROP_PCT", 50))
+    hold_insider_exit_min_wallets: int = field(default_factory=lambda: _int("HOLD_INSIDER_EXIT_MIN_WALLETS", 3))
 
     # Wallet quality scorer
     wallet_outcomes_interval: int = field(default_factory=lambda: _int("WALLET_OUTCOMES_INTERVAL", 600))

@@ -15,6 +15,7 @@ from dataclasses import asdict
 from analog import analog_report
 from circuit_breaker import CircuitBreaker
 from config import config
+from dashboard import start_dashboard, stop_dashboard
 from dexscreener import DexScreener
 from helius import Helius
 from jupiter import Jupiter, LAMPORTS_PER_SOL
@@ -144,7 +145,7 @@ class Bot:
         self.signal_log = SignalLog()
         self.monitor = Monitor(
             self.ds, self.jup, self.store, self.tg,
-            smart=self.smart_store, rug=self.rug,
+            smart=self.smart_store, rug=self.rug, pool=self.wallet_pool,
         )
         if (
             self.candidate_store is not None
@@ -162,6 +163,7 @@ class Bot:
         )
         self.macro = MacroCollector(self.pf) if config.macro_snapshot_enabled else None
         self.breaker = CircuitBreaker()
+        self._dashboard_handles = None
         self._stop = asyncio.Event()
         self._last_scan_ts: float = 0
         self._last_scan_count: int = 0
@@ -234,9 +236,20 @@ class Bot:
             )
             return
 
-        log.info("BUY %s amount=%.4f SOL (%s)", c.base_symbol, buy_amount, size_note)
+        chosen_wallet = self.wallet_pool.pick_for_buy()
+        log.info(
+            "BUY %s amount=%.4f SOL (%s) wallet=%s",
+            c.base_symbol, buy_amount, size_note, chosen_wallet.pubkey[:8],
+        )
+        # Entry holder snapshot — insider exit detection için
         try:
-            sig, tokens_raw = await self.jup.buy(c.base_token, buy_amount)
+            entry_holders = await self.rug.top_holders(c.base_token, n=20)
+        except Exception:
+            entry_holders = []
+        try:
+            sig, tokens_raw = await self.jup.buy(
+                c.base_token, buy_amount, keypair=chosen_wallet.keypair,
+            )
         except Exception as e:
             log.exception("buy failed")
             await self.tg.info(f"❌ Alım hatası ${c.base_symbol}: <code>{e}</code>")
@@ -260,6 +273,8 @@ class Bot:
             entry_top10_pct=safety.top10_pct,
             last_safety_check_ts=time.time(),
             sizing_multiplier=chosen_multiplier,
+            wallet_pubkey=chosen_wallet.pubkey,
+            entry_holders=entry_holders,
         )
         self.store.add(pos)
 
@@ -320,12 +335,17 @@ class Bot:
                 await self.tg.info(f"⚠️ ${symbol} için zaten açık pump pozisyon var.")
                 return
 
-        log.info("PUMPPORTAL BUY %s amount=%s SOL", symbol, sol_amount)
+        chosen_wallet = self.wallet_pool.pick_for_buy()
+        log.info(
+            "PUMPPORTAL BUY %s amount=%s SOL wallet=%s",
+            symbol, sol_amount, chosen_wallet.pubkey[:8],
+        )
         try:
             sig = await self.pumpportal.buy(
                 mint, sol_amount,
                 slippage_pct=config.pumpportal_slippage_pct,
                 priority_fee_sol=config.pumpportal_priority_fee_sol,
+                keypair=chosen_wallet.keypair,
             )
         except PumpPortalError as e:
             log.exception("pumpportal buy failed")
@@ -362,6 +382,7 @@ class Bot:
             score=0,
             original_entry_price_usd=entry_price_usd or 1e-9,
             is_pump_pos=True,
+            wallet_pubkey=chosen_wallet.pubkey,
         )
         self.store.add(pos)
 
@@ -402,15 +423,17 @@ class Bot:
             return 0.0
         return price_in_sol * sol_usd
 
-    async def _token_balance_raw(self, mint: str) -> int:
-        """Cüzdandaki SPL token bakiyesini raw birim olarak döner.
+    async def _token_balance_raw(self, mint: str, owner_pubkey: str | None = None) -> int:
+        """Bir cüzdanın SPL token bakiyesini raw birim olarak döner.
 
-        Pump→Raydium transition'da gerçek miktarı bilmek için.
+        Pump→Raydium transition'da gerçek miktarı bilmek için. owner_pubkey
+        verilmezse primary wallet kullanılır.
         """
         try:
             from solders.pubkey import Pubkey
             from solana.rpc.types import TokenAccountOpts
-            owner = Pubkey.from_string(self.wallet_pubkey)
+            owner_str = owner_pubkey or self.wallet_pubkey
+            owner = Pubkey.from_string(owner_str)
             mint_pk = Pubkey.from_string(mint)
             opts = TokenAccountOpts(mint=mint_pk)
             resp = await self.jup.rpc.get_token_accounts_by_owner_json_parsed(
@@ -455,8 +478,10 @@ class Bot:
         if not pair_address:
             return False
 
-        # 2. Gerçek token miktarını on-chain'den çek
-        token_balance = await self._token_balance_raw(pos.base_token)
+        # 2. Gerçek token miktarını on-chain'den çek (pozisyonun cüzdanından)
+        token_balance = await self._token_balance_raw(
+            pos.base_token, owner_pubkey=pos.wallet_pubkey,
+        )
         if token_balance <= 0:
             log.warning(
                 "graduation transition: zero token balance for %s, "
@@ -505,11 +530,17 @@ class Bot:
         if self.pumpportal is None:
             log.warning("pump close attempted but pumpportal is None")
             return
+        kp = None
+        if pos.wallet_pubkey:
+            entry = self.wallet_pool.find_by_pubkey(pos.wallet_pubkey)
+            if entry:
+                kp = entry.keypair
         try:
             sig = await self.pumpportal.sell(
                 pos.base_token, percent=100,
                 slippage_pct=config.pumpportal_slippage_pct,
                 priority_fee_sol=config.pumpportal_priority_fee_sol,
+                keypair=kp,
             )
         except Exception as e:
             log.exception("pump close failed for %s", pos.symbol)
@@ -1180,6 +1211,10 @@ class Bot:
         self.tg.set_walletpool_callback(self.walletpool_text)
 
         await self.tg.start()
+        try:
+            self._dashboard_handles = await start_dashboard(self)
+        except Exception:
+            log.exception("dashboard start failed (non-fatal)")
         await self.tg.info(
             f"🤖 <b>Memecoin Sniper başladı</b>\n"
             f"Cüzdan: <code>{self.wallet_pubkey[:8]}...{self.wallet_pubkey[-6:]}</code>\n"
@@ -1232,6 +1267,10 @@ class Bot:
         except Exception:
             pass
 
+        try:
+            await stop_dashboard(self._dashboard_handles)
+        except Exception:
+            log.exception("dashboard stop failed")
         await self.tg.stop()
         await self.ds.close()
         await self.jup.close()

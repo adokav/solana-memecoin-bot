@@ -205,6 +205,7 @@ PROFILE_WEIGHTS = {
         "ml_predicted": 1.0,
         "buy_velocity": 1.3,   # erken aşamada accumulation güçlü sinyal
         "liq_dispersion": 0.5, # yeni token tek pool'da normal, az ağırlık
+        "price_consistency": 0.8,  # tek pool varsa zaten tutarlı, daha az ağırlık
     },
     "trend": {
         "momentum": 0.9,
@@ -220,6 +221,7 @@ PROFILE_WEIGHTS = {
         "ml_predicted": 1.0,
         "buy_velocity": 1.0,
         "liq_dispersion": 1.2, # trend tokenda çok pool = sağlık
+        "price_consistency": 1.3,  # trend tokenda tutarlılık kritik (stale pool = red flag)
     },
 }
 
@@ -238,6 +240,7 @@ def _score(
     smart_weight: float = 0.0,
     buy_velocity: float = 0.0,
     liq_dispersion: float = 0.0,
+    price_consistency: float = 0.0,
 ) -> tuple[float, dict]:
     breakdown: dict = {}
 
@@ -333,6 +336,11 @@ def _score(
     ld_score = min(5.0, liq_dispersion)
     breakdown["liq_dispersion"] = round(ld_score, 1)
 
+    # Price consistency (max 5) — cross-DEX fiyat tutarlılığı
+    # 0..1 arası: 1 = mükemmel (tüm pool'larda aynı fiyat)
+    # 0 = stale pool / mixed liquidity → riskli sinyal
+    breakdown["price_consistency"] = round(price_consistency * 5, 1)
+
     # Profile-aware ağırlıklar (varsa)
     breakdown = _apply_profile_weights(breakdown, c.profile)
     total = sum(breakdown.values())
@@ -418,6 +426,41 @@ class Screener:
         if active_pools == 3:
             return 4.0
         return 5.0
+
+    @staticmethod
+    def _compute_price_consistency(pairs: list[dict]) -> float:
+        """Cross-DEX fiyat tutarlılığı: 0=büyük disparity, 1=mükemmel uyum.
+
+        Sadece >= $1k likidite pool'ları sayılır. Tek pool varsa 1.0 (vakuumda
+        tutarlı). 2+ pool varsa max/min fiyat oranı:
+          - oran ≤ 1.01 (%1 fark) → 1.0
+          - oran ≥ 1.10 (%10 fark) → 0.0
+          - ara: lineer interpolasyon
+        """
+        if not pairs:
+            return 0.0
+        active = []
+        for p in pairs:
+            try:
+                liq = float((p.get("liquidity") or {}).get("usd") or 0)
+                price = float(p.get("priceUsd") or 0)
+            except (TypeError, ValueError):
+                continue
+            if liq >= 1000 and price > 0:
+                active.append(price)
+        if len(active) <= 1:
+            return 1.0
+        max_p = max(active)
+        min_p = min(active)
+        if min_p <= 0:
+            return 0.0
+        ratio = max_p / min_p
+        if ratio <= 1.01:
+            return 1.0
+        if ratio >= 1.10:
+            return 0.0
+        # Lineer: 1.01 → 1.0, 1.10 → 0.0
+        return max(0.0, 1.0 - (ratio - 1.01) / 0.09)
 
     def _cooldown_hours_for(self, score: float) -> float:
         if score >= config.high_confidence_score:
@@ -556,12 +599,15 @@ class Screener:
 
             # Liquidity dispersion: kaç pool'da likidite var
             liq_dispersion = self._compute_liq_dispersion(pairs)
+            # Cross-DEX fiyat tutarlılığı
+            price_consistency = self._compute_price_consistency(pairs)
 
             score, breakdown = _score(
                 c,
                 smart_weight=smart_weight,
                 buy_velocity=buy_velocity,
                 liq_dispersion=liq_dispersion,
+                price_consistency=price_consistency,
             )
             c.score = score
             c.score_breakdown = breakdown
