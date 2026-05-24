@@ -58,6 +58,10 @@ BOT_COMMANDS: list[tuple[str, str]] = [
     ("pin", "Parametre + perf snapshot (örn /pin v2_after_smart)"),
     ("bandit", "Thompson sampling sizing arm durumları"),
     ("walletpool", "Multi-wallet pool durumu"),
+    ("chart", "PnL chart (örn /chart pnl, /chart daily, /chart score)"),
+    ("mev", "MEV / sandwich istatistikleri per-DEX"),
+    ("twitter", "Twitter influencer mention'ları (son 6h)"),
+    ("tune", "Auto-tuner önerileri (paper data analizi)"),
 ]
 
 # Klavyenin üzerinde sabit duran komut buton grid'i
@@ -182,6 +186,10 @@ class TelegramHub:
         self.app.add_handler(CommandHandler("pin", self._pin_cmd))
         self.app.add_handler(CommandHandler("bandit", self._bandit_cmd))
         self.app.add_handler(CommandHandler("walletpool", self._walletpool_cmd))
+        self.app.add_handler(CommandHandler("chart", self._chart_cmd))
+        self.app.add_handler(CommandHandler("mev", self._mev_cmd))
+        self.app.add_handler(CommandHandler("twitter", self._twitter_cmd))
+        self.app.add_handler(CommandHandler("tune", self._tune_cmd))
         self.app.add_handler(CallbackQueryHandler(self._on_button))
         self._status_cb: Callable[[], Awaitable[str]] | None = None
         self._health_cb: Callable[[], Awaitable[str]] | None = None
@@ -202,6 +210,10 @@ class TelegramHub:
         self._pin_cb: Callable[[str], Awaitable[str]] | None = None
         self._bandit_cb: Callable[[], Awaitable[str]] | None = None
         self._walletpool_cb: Callable[[], Awaitable[str]] | None = None
+        self._chart_cb: Callable[[str], Awaitable[tuple[bytes | None, str]]] | None = None
+        self._mev_cb: Callable[[], Awaitable[str]] | None = None
+        self._twitter_cb: Callable[[], Awaitable[str]] | None = None
+        self._tune_cb: Callable[[], Awaitable[str]] | None = None
         self._chat_id = config.telegram_chat_id
 
     def set_status_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
@@ -260,6 +272,18 @@ class TelegramHub:
 
     def set_walletpool_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
         self._walletpool_cb = cb
+
+    def set_chart_callback(self, cb) -> None:
+        self._chart_cb = cb
+
+    def set_mev_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
+        self._mev_cb = cb
+
+    def set_twitter_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
+        self._twitter_cb = cb
+
+    def set_tune_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
+        self._tune_cb = cb
 
     async def _start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
@@ -389,6 +413,37 @@ class TelegramHub:
 
     async def _walletpool_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         text = await self._walletpool_cb() if self._walletpool_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def _chart_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        which = ctx.args[0].lower() if ctx.args else "pnl"
+        if self._chart_cb is None:
+            await update.message.reply_text("Chart callback bağlı değil.")
+            return
+        png, caption = await self._chart_cb(which)
+        if not png:
+            await update.message.reply_text(
+                f"⚠️ Chart üretilemedi: {caption or 'veri yok'}",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        await self.app.bot.send_photo(
+            chat_id=self._chat_id,
+            photo=png,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+        )
+
+    async def _mev_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        text = await self._mev_cb() if self._mev_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def _twitter_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        text = await self._twitter_cb() if self._twitter_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def _tune_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        text = await self._tune_cb() if self._tune_cb else "Hazır değil."
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def _on_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

@@ -16,6 +16,7 @@ from dexscreener import DexScreener
 from lunarcrush import LunarCrush
 from pumpfun import PumpFun
 from smart_wallets import SmartWalletStore
+from twitter import TwitterStore
 
 try:
     from ml import ModelBundle, extract_features_from_dict, predict_win_probability
@@ -206,6 +207,7 @@ PROFILE_WEIGHTS = {
         "buy_velocity": 1.3,   # erken aşamada accumulation güçlü sinyal
         "liq_dispersion": 0.5, # yeni token tek pool'da normal, az ağırlık
         "price_consistency": 0.8,  # tek pool varsa zaten tutarlı, daha az ağırlık
+        "twitter_mentions": 1.2,   # KOL mention erken aşamada güçlü sinyal
     },
     "trend": {
         "momentum": 0.9,
@@ -222,6 +224,7 @@ PROFILE_WEIGHTS = {
         "buy_velocity": 1.0,
         "liq_dispersion": 1.2, # trend tokenda çok pool = sağlık
         "price_consistency": 1.3,  # trend tokenda tutarlılık kritik (stale pool = red flag)
+        "twitter_mentions": 1.0,
     },
 }
 
@@ -241,6 +244,7 @@ def _score(
     buy_velocity: float = 0.0,
     liq_dispersion: float = 0.0,
     price_consistency: float = 0.0,
+    twitter_mention_bonus: float = 0.0,
 ) -> tuple[float, dict]:
     breakdown: dict = {}
 
@@ -341,6 +345,10 @@ def _score(
     # 0 = stale pool / mixed liquidity → riskli sinyal
     breakdown["price_consistency"] = round(price_consistency * 5, 1)
 
+    # Twitter mentions (max 15) — kaç influencer aynı tokeni mention etti
+    # her unique handle TWITTER_MENTION_SCORE (5pt) getirir, max 15
+    breakdown["twitter_mentions"] = round(min(15.0, twitter_mention_bonus), 1)
+
     # Profile-aware ağırlıklar (varsa)
     breakdown = _apply_profile_weights(breakdown, c.profile)
     total = sum(breakdown.values())
@@ -357,12 +365,16 @@ class Screener:
         smart: SmartWalletStore | None = None,
         lunar: LunarCrush | None = None,
         ml_bundle=None,
+        twitter_store: TwitterStore | None = None,
+        mev_store=None,
     ) -> None:
         self.ds = ds
         self.pf = pf
         self.smart = smart
         self.lunar = lunar
         self.ml_bundle = ml_bundle  # ModelBundle veya None
+        self.twitter_store = twitter_store
+        self.mev_store = mev_store  # MevStore — DEX cooldown kontrolü için
         # {base_token: (last_alerted_ts, score)}  score=0 → red (rug/honeypot), uzun cooldown
         self._cooldown: dict[str, tuple[float, float]] = {}
         # {base_token: [(ts, liquidity_usd), ...]}  son N dakikadaki likidite snapshot'ları
@@ -602,12 +614,27 @@ class Screener:
             # Cross-DEX fiyat tutarlılığı
             price_consistency = self._compute_price_consistency(pairs)
 
+            # MEV cooldown: DEX şu an cezalıysa atla
+            if self.mev_store is not None and self.mev_store.is_dex_cooled(c.dex):
+                cuts["sanity"] += 1
+                continue
+
+            # Twitter mention bonus: hem mint adresi hem $SYMBOL key'leri
+            twitter_bonus = 0.0
+            if self.twitter_store is not None and config.twitter_enabled:
+                handles = self.twitter_store.unique_handles_for(c.base_token)
+                handles += self.twitter_store.unique_handles_for(
+                    "$" + c.base_symbol.upper()
+                )
+                twitter_bonus = handles * config.twitter_mention_score
+
             score, breakdown = _score(
                 c,
                 smart_weight=smart_weight,
                 buy_velocity=buy_velocity,
                 liq_dispersion=liq_dispersion,
                 price_consistency=price_consistency,
+                twitter_mention_bonus=twitter_bonus,
             )
             c.score = score
             c.score_breakdown = breakdown

@@ -195,6 +195,34 @@ class Config:
     # Ek cüzdanların private key'leri virgülle ayrılmış (ana cüzdan WALLET_PRIVATE_KEY)
     wallet_pool_keys: str = field(default_factory=lambda: _str("WALLET_POOL_KEYS", ""))
 
+    # --- MEV / sandwich detection ---
+    mev_monitor_enabled: bool = field(default_factory=lambda: _bool("MEV_MONITOR_ENABLED", True))
+    # Fill ratio bu eşiğin altındaysa sandwich şüphesi
+    mev_detect_fill_threshold: float = field(default_factory=lambda: _float("MEV_DETECT_FILL_THRESHOLD", 0.92))
+    # Bir DEX'te son N swap'tan X%'i şüpheliyse cooldown'a alınır
+    mev_min_swaps_for_cooldown: int = field(default_factory=lambda: _int("MEV_MIN_SWAPS_FOR_COOLDOWN", 10))
+    mev_cooldown_threshold_pct: float = field(default_factory=lambda: _float("MEV_COOLDOWN_THRESHOLD_PCT", 35))
+    mev_cooldown_hours: float = field(default_factory=lambda: _float("MEV_COOLDOWN_HOURS", 4))
+
+    # --- Twitter influencer scanner (Nitter RSS best-effort) ---
+    twitter_enabled: bool = field(default_factory=lambda: _bool("TWITTER_ENABLED", False))
+    # Takip edilecek X kullanıcıları, virgülle ayrılmış (@ olmadan)
+    twitter_handles: str = field(default_factory=lambda: _str("TWITTER_HANDLES", ""))
+    # Nitter mirror — public instance'lar zaman zaman düşer
+    twitter_nitter_base: str = field(default_factory=lambda: _str("TWITTER_NITTER_BASE", "https://nitter.privacydev.net"))
+    twitter_poll_interval: int = field(default_factory=lambda: _int("TWITTER_POLL_INTERVAL", 600))
+    # Bir token mention'ı bot için kaç puan değer
+    twitter_mention_score: float = field(default_factory=lambda: _float("TWITTER_MENTION_SCORE", 5))
+
+    # --- Telegram charts ---
+    charts_enabled: bool = field(default_factory=lambda: _bool("CHARTS_ENABLED", True))
+
+    # --- Auto-tuner (paper data istatistik analizi) ---
+    autotune_enabled: bool = field(default_factory=lambda: _bool("AUTOTUNE_ENABLED", True))
+    autotune_interval_hours: int = field(default_factory=lambda: _int("AUTOTUNE_INTERVAL_HOURS", 24))
+    # Minimum kapanan sample'dan az ise öneri üretmez
+    autotune_min_samples: int = field(default_factory=lambda: _int("AUTOTUNE_MIN_SAMPLES", 20))
+
     # --- Web dashboard ---
     dashboard_enabled: bool = field(default_factory=lambda: _bool("DASHBOARD_ENABLED", False))
     dashboard_port: int = field(default_factory=lambda: _int("DASHBOARD_PORT", 10000))

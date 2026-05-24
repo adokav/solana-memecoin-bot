@@ -318,6 +318,53 @@ cüzdan otomatik disable edilir:
 Yeni kalite hesabı her `WALLET_OUTCOMES_INTERVAL` (default 10dk) bir
 çalışır. Disable olduğunda Telegram'a uyarı düşer.
 
+### MEV / sandwich detection
+
+`MEV_MONITOR_ENABLED=true` (default). Her başarılı alımdan sonra:
+- Quote.outAmount vs cüzdana inen gerçek bakiye karşılaştırılır
+- Fill ratio < `MEV_DETECT_FILL_THRESHOLD` (0.92) → sandwich şüphesi
+- Per-DEX `data/mev_stats.json` istatistik
+- DEX'in son `MEV_MIN_SWAPS_FOR_COOLDOWN` (10) swap'ında suspect ratio
+  ≥ `MEV_COOLDOWN_THRESHOLD_PCT` (35%) ise `MEV_COOLDOWN_HOURS` (4) saatliğine
+  cooldown → screener o DEX'i atlar
+- `/mev` per-DEX istatistik
+
+### Twitter influencer scanner (best-effort)
+
+`TWITTER_ENABLED=true` + `TWITTER_HANDLES=ansem,cented,...` ile aktif.
+- Nitter RSS scraping ile her `TWITTER_POLL_INTERVAL` (10dk) handle'lerin
+  son tweet'leri çekilir
+- $SYMBOL ve Solana mint adresi mention'ları çıkartılır
+- 6h sliding window'da unique handle sayısı = score bonus
+- Screener'da `twitter_mentions` componenti, her unique handle
+  `TWITTER_MENTION_SCORE` (5pt) — max 15pt
+- `/twitter` son 6h mention listesi
+
+**NOT:** Nitter public instance'ları kararsız (`TWITTER_NITTER_BASE` env'ten
+override edilebilir). Resmi Twitter API ($100/ay) için ileride entegrasyon.
+Default kapalı.
+
+### Telegram charts
+
+`CHARTS_ENABLED=true` (default), `matplotlib` ile PNG üretip Telegram'a
+`send_photo`. Komutlar:
+- `/chart pnl` — real equity curve
+- `/chart paper` — paper equity curve
+- `/chart daily` — son 14 gün günlük PnL bar chart
+- `/chart score` — kapanmış pozisyonların skor dağılımı (win vs loss)
+
+### Auto-tuner
+
+`AUTOTUNE_ENABLED=true` (default), her `AUTOTUNE_INTERVAL_HOURS` (24)
+bir kapanmış pozisyonlar analiz edilir. Counterfactual simulation
+yapmaz — özet istatistikten parametre yönü önerir:
+- TP3: kazananların ort zirvesi vs mevcut
+- Trailing: yıkananlarda peak'ten ort drawdown
+- Min score: bucket bazlı WR inflection
+- Profile dengesizliği uyarısı
+- `/tune` manuel rapor; öneri otomatik Telegram'a düşer
+- Öneriler otomatik uygulanmaz — env + restart manuel
+
 ### Pin snapshots (parametre + perf tarihçesi)
 
 `PIN_AUTO_ENABLED=true` (default) → her `PIN_AUTO_INTERVAL_HOURS` (168 =
