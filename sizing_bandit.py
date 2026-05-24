@@ -33,8 +33,10 @@ log = logging.getLogger(__name__)
 
 DB_PATH = config.data_dir / "sizing_bandit.json"
 
-# Test edilecek çarpanlar
+# Test edilecek sizing çarpanları (entry için)
 DEFAULT_MULTIPLIERS = [0.5, 1.0, 1.5, 2.0]
+# Pyramid add'lerde test edilecek size ratio'lar
+DEFAULT_PYRAMID_RATIOS = [0.3, 0.5, 0.75, 1.0]
 
 
 @dataclass
@@ -59,8 +61,30 @@ class Arm:
 
 
 @dataclass
+class PyramidArm:
+    """(profile, bucket, ratio) için Beta arm — pyramid_size_ratio öğrenir."""
+    profile: str
+    bucket: str
+    ratio: float
+    alpha: float = 1.0
+    beta: float = 1.0
+    n_pulls: int = 0
+    last_pull_ts: float = 0.0
+
+    def sample(self, rng: random.Random) -> float:
+        return rng.betavariate(self.alpha, self.beta)
+
+    @property
+    def estimated_win_rate(self) -> float:
+        if self.alpha + self.beta < 0.001:
+            return 0.5
+        return self.alpha / (self.alpha + self.beta)
+
+
+@dataclass
 class BanditStore:
     arms: dict[str, Arm] = field(default_factory=dict)
+    pyramid_arms: dict[str, PyramidArm] = field(default_factory=dict)
 
     @classmethod
     def load(cls) -> "BanditStore":
@@ -72,15 +96,20 @@ class BanditStore:
             for a in data.get("arms", []):
                 arm = Arm(**a)
                 store.arms[_arm_key(arm.profile, arm.bucket, arm.multiplier)] = arm
+            for pa in data.get("pyramid_arms", []):
+                pyramid = PyramidArm(**pa)
+                store.pyramid_arms[_pyramid_arm_key(
+                    pyramid.profile, pyramid.bucket, pyramid.ratio,
+                )] = pyramid
         except (json.JSONDecodeError, TypeError, KeyError) as e:
             log.error("sizing bandit load error: %s", e)
         return store
 
     def save(self) -> None:
-        DB_PATH.write_text(json.dumps(
-            {"arms": [asdict(a) for a in self.arms.values()]},
-            indent=2,
-        ))
+        DB_PATH.write_text(json.dumps({
+            "arms": [asdict(a) for a in self.arms.values()],
+            "pyramid_arms": [asdict(a) for a in self.pyramid_arms.values()],
+        }, indent=2))
 
     def ensure_arms(self, profile: str, bucket: str) -> list[Arm]:
         """Bu (profile, bucket) için tüm multiplier'lar Beta(1,1) ile var olsun."""
@@ -133,6 +162,58 @@ def _arm_key(profile: str, bucket: str, multiplier: float) -> str:
     return f"{profile}|{bucket}|{multiplier}"
 
 
+def _pyramid_arm_key(profile: str, bucket: str, ratio: float) -> str:
+    return f"py|{profile}|{bucket}|{ratio}"
+
+
+def ensure_pyramid_arms(
+    store: BanditStore, profile: str, bucket: str,
+) -> list[PyramidArm]:
+    arms = []
+    for r in DEFAULT_PYRAMID_RATIOS:
+        key = _pyramid_arm_key(profile, bucket, r)
+        if key not in store.pyramid_arms:
+            store.pyramid_arms[key] = PyramidArm(
+                profile=profile, bucket=bucket, ratio=r,
+            )
+        arms.append(store.pyramid_arms[key])
+    return arms
+
+
+def pick_pyramid_ratio(
+    store: BanditStore, profile: str, bucket: str,
+    rng: random.Random | None = None,
+) -> float:
+    rng = rng or random.Random()
+    arms = ensure_pyramid_arms(store, profile, bucket)
+    best: tuple[float, PyramidArm] | None = None
+    for arm in arms:
+        s = arm.sample(rng)
+        if best is None or s > best[0]:
+            best = (s, arm)
+    chosen = best[1] if best else arms[0]
+    chosen.n_pulls += 1
+    chosen.last_pull_ts = time.time()
+    store.save()
+    return chosen.ratio
+
+
+def update_pyramid_arm(
+    store: BanditStore, profile: str, bucket: str,
+    ratio: float, won: bool,
+) -> None:
+    key = _pyramid_arm_key(profile, bucket, ratio)
+    arm = store.pyramid_arms.get(key)
+    if arm is None:
+        arm = PyramidArm(profile=profile, bucket=bucket, ratio=ratio)
+        store.pyramid_arms[key] = arm
+    if won:
+        arm.alpha += 1
+    else:
+        arm.beta += 1
+    store.save()
+
+
 def choose_sizing(
     score_total: float,
     profile: str,
@@ -159,45 +240,72 @@ def choose_sizing(
 
 
 def update_from_position(store: BanditStore, pos: Position) -> bool:
-    """Closed position'dan ilgili arm'ı güncelle. True = güncelleme yapıldı."""
+    """Closed position'dan ilgili arm'ı güncelle. True = güncelleme yapıldı.
+
+    Pyramid bandit aktifse her pyramid_add için de ilgili pyramid_arm'ı
+    pozisyonun final outcome'ı ile günceller.
+    """
     if pos.status != "closed":
         return False
     if pos.sizing_multiplier is None:
         return False
     if pos.pnl_pct is None:
-        # Pnl_pct hesaplanmamışsa hesapla
         if pos.sol_spent > 0:
             pnl = ((pos.sol_received_total - pos.sol_spent) / pos.sol_spent) * 100
         else:
             return False
     else:
         pnl = pos.pnl_pct
-    won = pnl >= config.ml_win_threshold_pct  # ML'le aynı eşik (30%)
+    won = pnl >= config.ml_win_threshold_pct
     bucket = bucket_label(pos.score)
     store.update(pos.profile, bucket, pos.sizing_multiplier, won)
+
+    # Pyramid arm güncellemesi (varsa)
+    if config.pyramid_bandit_enabled and pos.pyramid_adds:
+        for add in pos.pyramid_adds:
+            # Ratio = pyramid_add'in sol_spent / config.buy_amount_sol
+            if config.buy_amount_sol <= 0:
+                continue
+            ratio = round(add.sol_spent / config.buy_amount_sol, 2)
+            update_pyramid_arm(store, pos.profile, bucket, ratio, won)
     return True
 
 
 def format_bandit_status(store: BanditStore) -> str:
-    if not store.arms:
+    if not store.arms and not store.pyramid_arms:
         return "🎰 <b>Sizing bandit</b>\nHenüz veri yok."
     lines = [
-        f"🎰 <b>Sizing bandit</b> ({len(store.arms)} arm)",
-        f"<i>Win threshold: +{config.ml_win_threshold_pct:.0f}% pnl</i>\n",
+        f"🎰 <b>Sizing bandit</b>",
+        f"<i>Win threshold: +{config.ml_win_threshold_pct:.0f}% pnl</i>",
     ]
-    # Profile + bucket bazında grupla
-    by_pb: dict[tuple[str, str], list[Arm]] = {}
-    for a in store.arms.values():
-        by_pb.setdefault((a.profile, a.bucket), []).append(a)
-    for (prof, bucket), arms in sorted(by_pb.items()):
-        arms.sort(key=lambda a: a.multiplier)
-        lines.append(f"<b>{prof} / {bucket}</b>")
-        for a in arms:
-            n = a.n_pulls
-            wr = a.estimated_win_rate * 100
-            lines.append(
-                f"  ×{a.multiplier:.1f}  n=<code>{n}</code>  "
-                f"WR≈<code>{wr:.0f}%</code>"
-            )
-        lines.append("")
+
+    if store.arms:
+        lines.append(f"\n<b>Entry sizing</b> ({len(store.arms)} arm)")
+        by_pb: dict[tuple[str, str], list[Arm]] = {}
+        for a in store.arms.values():
+            by_pb.setdefault((a.profile, a.bucket), []).append(a)
+        for (prof, bucket), arms in sorted(by_pb.items()):
+            arms.sort(key=lambda a: a.multiplier)
+            lines.append(f"<i>{prof} / {bucket}</i>")
+            for a in arms:
+                wr = a.estimated_win_rate * 100
+                lines.append(
+                    f"  ×{a.multiplier:.1f}  n=<code>{a.n_pulls}</code>  "
+                    f"WR≈<code>{wr:.0f}%</code>"
+                )
+
+    if store.pyramid_arms:
+        lines.append(f"\n<b>Pyramid ratios</b> ({len(store.pyramid_arms)} arm)")
+        by_pb_py: dict[tuple[str, str], list[PyramidArm]] = {}
+        for pa in store.pyramid_arms.values():
+            by_pb_py.setdefault((pa.profile, pa.bucket), []).append(pa)
+        for (prof, bucket), arms in sorted(by_pb_py.items()):
+            arms.sort(key=lambda a: a.ratio)
+            lines.append(f"<i>{prof} / {bucket}</i>")
+            for a in arms:
+                wr = a.estimated_win_rate * 100
+                lines.append(
+                    f"  ratio {a.ratio:.2f}  n=<code>{a.n_pulls}</code>  "
+                    f"WR≈<code>{wr:.0f}%</code>"
+                )
     return "\n".join(lines).rstrip()

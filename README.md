@@ -403,16 +403,51 @@ Multiplier'lar: 0.5×, 1.0×, 1.5×, 2.0× (BUY_AMOUNT_SOL üzerinden).
   Tek pool = 0, 3+ pool = 5. Trend tokenlarda 1.2× ağırlıkla (sağlık
   göstergesi); erken'de 0.5× (yeni token tek pool'da normal).
 
-### Multi-wallet rotation (gerçek plumbing)
+### Multi-wallet rotation + risk profiles
 
-`WALLET_POOL_ENABLED=true` + `WALLET_POOL_KEYS=key1,key2,...` ile aktif.
-- Her buy `pick_for_buy()` ile rastgele cüzdan seçer (load distribution +
-  anti-MEV pattern detection)
-- `Position.wallet_pubkey` saklanır; sell ve pyramid add aynı cüzdandan
-  yapılır
-- Pump pozisyonları ve graduation transition'da da aynı cüzdan
-- `/walletpool` ile durum
-- Default kapalı — küçük operasyonda gerek yok, büyüdükçe açılır
+`WALLET_POOL_ENABLED=true` + `WALLET_POOL_KEYS` formatı:
+- `key1,key2` → her ikisi de "balanced"
+- `key1:aggressive,key2:conservative` → profile belirtilir
+- `key1:aggressive:1.8` → profile + custom size multiplier
+
+Profile default'ları:
+- 🔥 aggressive: 1.5× size
+- ⚖️ balanced: 1.0× size
+- 🛡 conservative: 0.5× size
+
+Picker (`pick_for_buy(score_total)`) skor bantına göre profil seçer:
+- score ≥ 85 (high conviction) → aggressive havuzundan
+- 70 ≤ score < 85 → balanced
+- score < 70 → conservative
+- Profile boşsa fallback chain: balanced → primary
+
+Pre-grad pump alımları sabit aggressive (yüksek risk/getiri).
+Pozisyonun `size_multiplier`'ı diğer sizing (bandit/adaptive) üzerine
+çarpılır → wallet profili ek bir risk katmanı.
+
+### Telegram alpha channel monitor
+
+`TELEGRAM_CHANNELS_ENABLED=true` + `TELEGRAM_CHANNELS=channel1,channel2,...`
+ile aktif. Public channel'ların HTML preview sayfası (`t.me/s/<channel>`)
+scraping ile her `TELEGRAM_CHANNELS_POLL_INTERVAL` (5dk) çekilir.
+
+- Mesajlardan $SYMBOL ve Solana mint mention'ları çıkar
+- 6h sliding window'da unique channel sayısı → `telegram_mentions` score
+- Her unique channel `TELEGRAM_MENTION_SCORE` (5pt) — max 15pt
+- Profile weights: early 1.3× (alfa kanalları en hızlı sinyal), trend 1.0×
+- `/tgchannels` son 6h listesi
+- Private channel'lar için Telethon gerekir — bu modül sadece public
+
+### Pyramid bandit
+
+`PYRAMID_BANDIT_ENABLED=true` ile aktif. Pyramid add tetiklendiğinde
+`pyramid_size_ratio` Thompson sampling ile seçilir:
+- Arms: 0.3, 0.5, 0.75, 1.0 (BUY_AMOUNT_SOL üzerinden)
+- Her (profile, score_bucket, ratio) için Beta(α, β)
+- Pozisyon kapanınca tüm pyramid_adds'in ratio'su pozisyonun final
+  outcome'ı ile güncellenir (win/loss)
+- `/bandit` artık entry + pyramid arm'larını birlikte gösterir
+- Default kapalı — pyramid_size_ratio fixed (0.5) kalır
 
 ### Cross-DEX price awareness
 

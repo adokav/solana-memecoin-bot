@@ -32,6 +32,7 @@ class Monitor:
         smart: SmartWalletStore | None = None,
         rug: RugCheckClient | None = None,
         pool=None,
+        bandit_store=None,
     ) -> None:
         self.ds = ds
         self.jup = jup
@@ -40,6 +41,7 @@ class Monitor:
         self.smart = smart
         self.rug = rug
         self.pool = pool  # WalletPool veya None
+        self.bandit_store = bandit_store  # BanditStore veya None — pyramid bandit için
 
     def _keypair_for(self, pos: Position):
         """Pozisyonu hangi cüzdan açtıysa onun keypair'ini döner.
@@ -177,7 +179,16 @@ class Monitor:
         if pnl_from_orig < trigger_pct:
             return False
 
-        add_sol = config.buy_amount_sol * config.pyramid_size_ratio
+        # Pyramid size ratio: bandit varsa Thompson sample, yoksa fixed
+        if config.pyramid_bandit_enabled and self.bandit_store is not None:
+            from pnl import bucket_label
+            from sizing_bandit import pick_pyramid_ratio
+            ratio = pick_pyramid_ratio(
+                self.bandit_store, pos.profile, bucket_label(pos.score),
+            )
+        else:
+            ratio = config.pyramid_size_ratio
+        add_sol = config.buy_amount_sol * ratio
         # Exposure cap: yine de toplam riski koru
         current_exposure = sum(p.sol_spent for p in self.store.open_positions())
         if current_exposure + add_sol > config.max_total_exposure_sol:
