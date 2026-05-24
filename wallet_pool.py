@@ -1,21 +1,28 @@
-"""Multi-wallet pool (anti-detection scaffolding).
+"""Multi-wallet pool — risk-profile aware allocation.
 
-Default kapalı (WALLET_POOL_ENABLED=false). Aktifken ana cüzdana ek
-olarak WALLET_POOL_KEYS env'inden virgülle ayrılmış private key'ler
-yüklenir. Buy işlemleri rastgele bir cüzdanla yapılır; sell aynı
-cüzdandan çıkar (Position.wallet_pubkey saklanır).
+Default kapalı (WALLET_POOL_ENABLED=false). Aktifken WALLET_POOL_KEYS
+env'inden virgülle ayrılmış key'ler yüklenir. Format:
+  - "key1,key2"  → her ikisi de balanced profile
+  - "key1:aggressive,key2:conservative" → profile belirtilmiş
+  - "key1:aggressive:1.5,key2" → profile + custom size multiplier
 
-MEV bot'larının bot'umuzu pattern tanımasını zorlaştırır. Şu an ölçeğimizde
-gerçek MEV hedefimiz olmayabilir ama altyapı hazır — büyüdükçe açılır.
+Profiles ve default sizing weight'leri:
+  - aggressive: 1.5×  (yüksek skor adaylara yönlendirilir)
+  - balanced:   1.0×  (mid-skor)
+  - conservative: 0.5× (düşük skor / her zaman güvenli)
 
-Buy/sell entegrasyonu Jupiter ve PumpPortal client'larında — şu an
-sadece pool yönetimi scaffolding.
+Picker (pick_for_buy(score_total)) skor bantına göre profil seçer:
+  - score ≥ 85 (high conviction): aggressive havuzundan rastgele
+  - 70 ≤ score < 85: balanced havuzdan
+  - score < 70: conservative havuzdan
+  - İlgili profile yoksa fallback primary
 """
 from __future__ import annotations
 
 import logging
 import random
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 
 import base58
 from solders.keypair import Keypair
@@ -25,10 +32,19 @@ from config import config
 log = logging.getLogger(__name__)
 
 
+PROFILE_DEFAULT_SIZE = {
+    "aggressive": 1.5,
+    "balanced": 1.0,
+    "conservative": 0.5,
+}
+
+
 @dataclass
 class WalletEntry:
     keypair: Keypair
     pubkey: str
+    profile: str = "balanced"
+    size_multiplier: float = 1.0
     last_used_ts: float = 0.0
     n_used: int = 0
 
@@ -37,6 +53,7 @@ class WalletPool:
     def __init__(self, primary: Keypair) -> None:
         self.primary = WalletEntry(
             keypair=primary, pubkey=str(primary.pubkey()),
+            profile="balanced", size_multiplier=1.0,
         )
         self.extras: list[WalletEntry] = []
         if config.wallet_pool_enabled and config.wallet_pool_keys:
@@ -45,10 +62,9 @@ class WalletPool:
                 if not raw:
                     continue
                 try:
-                    kp = self._load_keypair_b58(raw)
-                    self.extras.append(WalletEntry(
-                        keypair=kp, pubkey=str(kp.pubkey()),
-                    ))
+                    entry = self._parse_entry(raw)
+                    if entry:
+                        self.extras.append(entry)
                 except Exception:
                     log.exception("wallet pool: failed to load secondary key")
         log.info(
@@ -56,24 +72,59 @@ class WalletPool:
             len(self.extras), config.wallet_pool_enabled,
         )
 
-    @staticmethod
-    def _load_keypair_b58(raw: str) -> Keypair:
-        secret = base58.b58decode(raw)
-        return Keypair.from_bytes(secret)
+    def _parse_entry(self, raw: str) -> WalletEntry | None:
+        """Format: key | key:profile | key:profile:multiplier"""
+        parts = raw.split(":")
+        key_b58 = parts[0].strip()
+        profile = (parts[1].strip().lower() if len(parts) > 1 else "balanced")
+        if profile not in PROFILE_DEFAULT_SIZE:
+            log.warning("wallet pool: unknown profile '%s', using balanced", profile)
+            profile = "balanced"
+        if len(parts) > 2:
+            try:
+                multiplier = float(parts[2].strip())
+            except ValueError:
+                multiplier = PROFILE_DEFAULT_SIZE[profile]
+        else:
+            multiplier = PROFILE_DEFAULT_SIZE[profile]
+        try:
+            secret = base58.b58decode(key_b58)
+            kp = Keypair.from_bytes(secret)
+        except Exception:
+            log.exception("wallet pool: invalid key")
+            return None
+        return WalletEntry(
+            keypair=kp, pubkey=str(kp.pubkey()),
+            profile=profile, size_multiplier=multiplier,
+        )
 
     def all_wallets(self) -> list[WalletEntry]:
         return [self.primary] + self.extras
 
-    def pick_for_buy(self) -> WalletEntry:
-        """Buy için cüzdan seç. Pool kapalıysa primary, açıksa rastgele."""
+    def _wallets_by_profile(self, profile: str) -> list[WalletEntry]:
+        return [w for w in self.all_wallets() if w.profile == profile]
+
+    def pick_for_buy(self, score_total: float = 0.0) -> WalletEntry:
+        """Skor bantına göre profil seçer, ilgili profil havuzundan rastgele."""
         if not config.wallet_pool_enabled or not self.extras:
-            self.primary.last_used_ts = _now()
+            self.primary.last_used_ts = time.time()
             self.primary.n_used += 1
             return self.primary
-        # Tüm cüzdanlardan rastgele seç (load balance)
-        all_wallets = self.all_wallets()
-        chosen = random.choice(all_wallets)
-        chosen.last_used_ts = _now()
+
+        if score_total >= 85:
+            preferred = "aggressive"
+        elif score_total >= 70:
+            preferred = "balanced"
+        else:
+            preferred = "conservative"
+
+        candidates = self._wallets_by_profile(preferred)
+        if not candidates:
+            # Fallback chain: balanced -> primary
+            candidates = self._wallets_by_profile("balanced") or [self.primary]
+
+        chosen = random.choice(candidates)
+        chosen.last_used_ts = time.time()
         chosen.n_used += 1
         return chosen
 
@@ -82,11 +133,6 @@ class WalletPool:
             if w.pubkey == pubkey:
                 return w
         return None
-
-
-def _now() -> float:
-    import time
-    return time.time()
 
 
 def format_pool_status(pool: WalletPool) -> str:
@@ -99,10 +145,28 @@ def format_pool_status(pool: WalletPool) -> str:
     lines = [
         f"💼 <b>Wallet pool</b> ({1 + len(pool.extras)} cüzdan)",
     ]
+    # Profile dağılımı
+    counts: dict[str, int] = {"aggressive": 0, "balanced": 0, "conservative": 0}
+    for w in pool.all_wallets():
+        counts[w.profile] = counts.get(w.profile, 0) + 1
+    lines.append(
+        f"<i>Profile dağılımı: 🔥 {counts.get('aggressive', 0)} agg / "
+        f"⚖️ {counts.get('balanced', 0)} bal / "
+        f"🛡 {counts.get('conservative', 0)} cons</i>\n"
+    )
     for i, w in enumerate(pool.all_wallets()):
-        tag = "🔑 primary" if i == 0 else f"🗝️  extra {i}"
+        tag = "🔑" if i == 0 else "🗝️"
+        emoji = {"aggressive": "🔥", "balanced": "⚖️", "conservative": "🛡"}.get(
+            w.profile, "?"
+        )
         short = f"{w.pubkey[:8]}..{w.pubkey[-6:]}"
         lines.append(
-            f"{tag}  <code>{short}</code>  used=<code>{w.n_used}</code>"
+            f"{tag} <code>{short}</code>  {emoji} {w.profile} "
+            f"×<code>{w.size_multiplier:.1f}</code>  "
+            f"used=<code>{w.n_used}</code>"
         )
+    lines.append(
+        "\n<i>Picker: skor ≥85 → aggressive, 70-85 → balanced, "
+        "&lt;70 → conservative</i>"
+    )
     return "\n".join(lines)

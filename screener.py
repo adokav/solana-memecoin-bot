@@ -16,6 +16,7 @@ from dexscreener import DexScreener
 from lunarcrush import LunarCrush
 from pumpfun import PumpFun
 from smart_wallets import SmartWalletStore
+from telegram_channels import TelegramMentionStore
 from twitter import TwitterStore
 
 try:
@@ -208,6 +209,7 @@ PROFILE_WEIGHTS = {
         "liq_dispersion": 0.5, # yeni token tek pool'da normal, az ağırlık
         "price_consistency": 0.8,  # tek pool varsa zaten tutarlı, daha az ağırlık
         "twitter_mentions": 1.2,   # KOL mention erken aşamada güçlü sinyal
+        "telegram_mentions": 1.3,  # alfa kanalları erken aşamada en hızlı sinyal
     },
     "trend": {
         "momentum": 0.9,
@@ -225,6 +227,7 @@ PROFILE_WEIGHTS = {
         "liq_dispersion": 1.2, # trend tokenda çok pool = sağlık
         "price_consistency": 1.3,  # trend tokenda tutarlılık kritik (stale pool = red flag)
         "twitter_mentions": 1.0,
+        "telegram_mentions": 1.0,
     },
 }
 
@@ -245,6 +248,7 @@ def _score(
     liq_dispersion: float = 0.0,
     price_consistency: float = 0.0,
     twitter_mention_bonus: float = 0.0,
+    telegram_mention_bonus: float = 0.0,
 ) -> tuple[float, dict]:
     breakdown: dict = {}
 
@@ -349,6 +353,9 @@ def _score(
     # her unique handle TWITTER_MENTION_SCORE (5pt) getirir, max 15
     breakdown["twitter_mentions"] = round(min(15.0, twitter_mention_bonus), 1)
 
+    # Telegram channel mentions (max 15) — alfa kanalları
+    breakdown["telegram_mentions"] = round(min(15.0, telegram_mention_bonus), 1)
+
     # Profile-aware ağırlıklar (varsa)
     breakdown = _apply_profile_weights(breakdown, c.profile)
     total = sum(breakdown.values())
@@ -367,6 +374,7 @@ class Screener:
         ml_bundle=None,
         twitter_store: TwitterStore | None = None,
         mev_store=None,
+        telegram_store: TelegramMentionStore | None = None,
     ) -> None:
         self.ds = ds
         self.pf = pf
@@ -375,6 +383,7 @@ class Screener:
         self.ml_bundle = ml_bundle  # ModelBundle veya None
         self.twitter_store = twitter_store
         self.mev_store = mev_store  # MevStore — DEX cooldown kontrolü için
+        self.telegram_store = telegram_store
         # {base_token: (last_alerted_ts, score)}  score=0 → red (rug/honeypot), uzun cooldown
         self._cooldown: dict[str, tuple[float, float]] = {}
         # {base_token: [(ts, liquidity_usd), ...]}  son N dakikadaki likidite snapshot'ları
@@ -628,6 +637,18 @@ class Screener:
                 )
                 twitter_bonus = handles * config.twitter_mention_score
 
+            # Telegram channel mention bonus
+            telegram_bonus = 0.0
+            if (
+                self.telegram_store is not None
+                and config.telegram_channels_enabled
+            ):
+                ch = self.telegram_store.unique_channels_for(c.base_token)
+                ch += self.telegram_store.unique_channels_for(
+                    "$" + c.base_symbol.upper()
+                )
+                telegram_bonus = ch * config.telegram_mention_score
+
             score, breakdown = _score(
                 c,
                 smart_weight=smart_weight,
@@ -635,6 +656,7 @@ class Screener:
                 liq_dispersion=liq_dispersion,
                 price_consistency=price_consistency,
                 twitter_mention_bonus=twitter_bonus,
+                telegram_mention_bonus=telegram_bonus,
             )
             c.score = score
             c.score_breakdown = breakdown

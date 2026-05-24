@@ -62,6 +62,7 @@ BOT_COMMANDS: list[tuple[str, str]] = [
     ("mev", "MEV / sandwich istatistikleri per-DEX"),
     ("twitter", "Twitter influencer mention'ları (son 6h)"),
     ("tune", "Auto-tuner önerileri (paper data analizi)"),
+    ("tgchannels", "Telegram alpha channel mention'ları (son 6h)"),
 ]
 
 # Klavyenin üzerinde sabit duran komut buton grid'i
@@ -190,6 +191,7 @@ class TelegramHub:
         self.app.add_handler(CommandHandler("mev", self._mev_cmd))
         self.app.add_handler(CommandHandler("twitter", self._twitter_cmd))
         self.app.add_handler(CommandHandler("tune", self._tune_cmd))
+        self.app.add_handler(CommandHandler("tgchannels", self._tgchannels_cmd))
         self.app.add_handler(CallbackQueryHandler(self._on_button))
         self._status_cb: Callable[[], Awaitable[str]] | None = None
         self._health_cb: Callable[[], Awaitable[str]] | None = None
@@ -214,6 +216,7 @@ class TelegramHub:
         self._mev_cb: Callable[[], Awaitable[str]] | None = None
         self._twitter_cb: Callable[[], Awaitable[str]] | None = None
         self._tune_cb: Callable[[], Awaitable[str]] | None = None
+        self._tgchannels_cb: Callable[[], Awaitable[str]] | None = None
         self._chat_id = config.telegram_chat_id
 
     def set_status_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
@@ -284,6 +287,9 @@ class TelegramHub:
 
     def set_tune_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
         self._tune_cb = cb
+
+    def set_tgchannels_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
+        self._tgchannels_cb = cb
 
     async def _start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
@@ -444,6 +450,10 @@ class TelegramHub:
 
     async def _tune_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         text = await self._tune_cb() if self._tune_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def _tgchannels_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        text = await self._tgchannels_cb() if self._tgchannels_cb else "Hazır değil."
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def _on_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

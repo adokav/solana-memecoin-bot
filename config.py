@@ -204,6 +204,15 @@ class Config:
     mev_cooldown_threshold_pct: float = field(default_factory=lambda: _float("MEV_COOLDOWN_THRESHOLD_PCT", 35))
     mev_cooldown_hours: float = field(default_factory=lambda: _float("MEV_COOLDOWN_HOURS", 4))
 
+    # --- Telegram alpha channel monitor (HTML preview scraping) ---
+    telegram_channels_enabled: bool = field(default_factory=lambda: _bool("TELEGRAM_CHANNELS_ENABLED", False))
+    telegram_channels: str = field(default_factory=lambda: _str("TELEGRAM_CHANNELS", ""))
+    telegram_channels_poll_interval: int = field(default_factory=lambda: _int("TELEGRAM_CHANNELS_POLL_INTERVAL", 300))
+    telegram_mention_score: float = field(default_factory=lambda: _float("TELEGRAM_MENTION_SCORE", 5))
+
+    # --- Pyramid bandit (size_ratio için Thompson sampling) ---
+    pyramid_bandit_enabled: bool = field(default_factory=lambda: _bool("PYRAMID_BANDIT_ENABLED", False))
+
     # --- Twitter influencer scanner (Nitter RSS best-effort) ---
     twitter_enabled: bool = field(default_factory=lambda: _bool("TWITTER_ENABLED", False))
     # Takip edilecek X kullanıcıları, virgülle ayrılmış (@ olmadan)

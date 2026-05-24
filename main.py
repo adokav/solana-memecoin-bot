@@ -78,6 +78,7 @@ from wallet_discovery import (
     format_candidates_text,
 )
 from storage import Position, Store
+from telegram_channels import TelegramChannelScanner, format_telegram_status
 from telegram_handler import TelegramHub, set_buy_callback, set_pump_buy_callback
 from twitter import TwitterScanner, format_twitter_status
 from wallet import load_keypair
@@ -152,11 +153,13 @@ class Bot:
             self.ds, self.pf, self.smart_store, self.lunar, self.ml_bundle,
             twitter_store=(self.twitter_scanner.store if self.twitter_scanner else None),
             mev_store=self.mev_store,
+            telegram_store=(self.tg_channels_scanner.store if self.tg_channels_scanner else None),
         )
         self.signal_log = SignalLog()
         self.monitor = Monitor(
             self.ds, self.jup, self.store, self.tg,
             smart=self.smart_store, rug=self.rug, pool=self.wallet_pool,
+            bandit_store=self.bandit_store,
         )
         if (
             self.candidate_store is not None
@@ -178,6 +181,11 @@ class Bot:
         self.mev_store = MevStore.load() if config.mev_monitor_enabled else None
         self.twitter_scanner = (
             TwitterScanner() if config.twitter_enabled and config.twitter_handles
+            else None
+        )
+        self.tg_channels_scanner = (
+            TelegramChannelScanner()
+            if config.telegram_channels_enabled and config.telegram_channels
             else None
         )
         self._stop = asyncio.Event()
@@ -252,7 +260,16 @@ class Bot:
             )
             return
 
-        chosen_wallet = self.wallet_pool.pick_for_buy()
+        total_score = c.score + safety.score
+        chosen_wallet = self.wallet_pool.pick_for_buy(score_total=total_score)
+        # Wallet'in risk profili sizing'e ek katman uygular
+        # (size_multiplier=1.0 ise no-op; primary tek başınaysa zaten 1.0)
+        if chosen_wallet.size_multiplier != 1.0:
+            buy_amount = buy_amount * chosen_wallet.size_multiplier
+            size_note = (
+                f"{size_note} | wallet {chosen_wallet.profile} "
+                f"×{chosen_wallet.size_multiplier:.1f}"
+            )
         # MEV blacklist: bu DEX'te suspect oranı yüksekse atla
         if self.mev_store is not None and self.mev_store.is_dex_cooled(c.dex):
             await self.tg.info(
@@ -384,10 +401,11 @@ class Bot:
                 await self.tg.info(f"⚠️ ${symbol} için zaten açık pump pozisyon var.")
                 return
 
-        chosen_wallet = self.wallet_pool.pick_for_buy()
+        # Pre-grad alımı için aggressive bant (yüksek risk/yüksek getiri)
+        chosen_wallet = self.wallet_pool.pick_for_buy(score_total=85)
         log.info(
-            "PUMPPORTAL BUY %s amount=%s SOL wallet=%s",
-            symbol, sol_amount, chosen_wallet.pubkey[:8],
+            "PUMPPORTAL BUY %s amount=%s SOL wallet=%s (%s)",
+            symbol, sol_amount, chosen_wallet.pubkey[:8], chosen_wallet.profile,
         )
         try:
             sig = await self.pumpportal.buy(
@@ -678,6 +696,18 @@ class Bot:
                     log.exception("twitter loop error")
             await asyncio.sleep(config.twitter_poll_interval)
 
+    # ---------- Loop: Telegram channel polling ----------
+
+    async def tg_channels_loop(self) -> None:
+        await asyncio.sleep(50)
+        while not self._stop.is_set():
+            if self.tg_channels_scanner is not None:
+                try:
+                    await self.tg_channels_scanner.poll_all()
+                except Exception:
+                    log.exception("tg channels loop error")
+            await asyncio.sleep(config.telegram_channels_poll_interval)
+
     # ---------- Loop: auto-tuner günlük rapor ----------
 
     async def autotune_loop(self) -> None:
@@ -929,6 +959,15 @@ class Bot:
                 "TWITTER_HANDLES=user1,user2,..."
             )
         return format_twitter_status(self.twitter_scanner.store)
+
+    async def tgchannels_text(self) -> str:
+        if self.tg_channels_scanner is None:
+            return (
+                "💬 Telegram channels kapalı.\n"
+                "Aktif etmek için: TELEGRAM_CHANNELS_ENABLED=true + "
+                "TELEGRAM_CHANNELS=channel1,channel2,..."
+            )
+        return format_telegram_status(self.tg_channels_scanner.store)
 
     async def tune_text(self) -> str:
         positions = list(self.store.positions)
@@ -1347,6 +1386,7 @@ class Bot:
         self.tg.set_mev_callback(self.mev_text)
         self.tg.set_twitter_callback(self.twitter_text)
         self.tg.set_tune_callback(self.tune_text)
+        self.tg.set_tgchannels_callback(self.tgchannels_text)
 
         await self.tg.start()
         try:
@@ -1394,6 +1434,8 @@ class Bot:
             tasks.append(asyncio.create_task(self.auto_pin_loop(), name="auto_pin"))
         if self.twitter_scanner is not None:
             tasks.append(asyncio.create_task(self.twitter_loop(), name="twitter"))
+        if self.tg_channels_scanner is not None:
+            tasks.append(asyncio.create_task(self.tg_channels_loop(), name="tg_channels"))
         if config.autotune_enabled:
             tasks.append(asyncio.create_task(self.autotune_loop(), name="autotune"))
 
@@ -1429,6 +1471,8 @@ class Bot:
             await self.pumpportal.close()
         if self.twitter_scanner is not None:
             await self.twitter_scanner.close()
+        if self.tg_channels_scanner is not None:
+            await self.tg_channels_scanner.close()
 
 
 def main() -> None:
