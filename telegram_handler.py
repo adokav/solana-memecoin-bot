@@ -53,6 +53,8 @@ BOT_COMMANDS: list[tuple[str, str]] = [
     ("addwallet", "Smart wallet ekle: /addwallet <adres> [label]"),
     ("rmwallet", "Smart wallet çıkar: /rmwallet <adres>"),
     ("candidates", "Otomatik keşfedilen aday wallet'ları göster"),
+    ("train", "ML modelini paper + real kapanan trade'lerden eğit"),
+    ("mlstatus", "ML model durumu (sample, accuracy)"),
 ]
 
 # Klavyenin üzerinde sabit duran komut buton grid'i
@@ -172,6 +174,8 @@ class TelegramHub:
         self.app.add_handler(CommandHandler("addwallet", self._addwallet_cmd))
         self.app.add_handler(CommandHandler("rmwallet", self._rmwallet_cmd))
         self.app.add_handler(CommandHandler("candidates", self._candidates_cmd))
+        self.app.add_handler(CommandHandler("train", self._train_cmd))
+        self.app.add_handler(CommandHandler("mlstatus", self._mlstatus_cmd))
         self.app.add_handler(CallbackQueryHandler(self._on_button))
         self._status_cb: Callable[[], Awaitable[str]] | None = None
         self._health_cb: Callable[[], Awaitable[str]] | None = None
@@ -187,6 +191,8 @@ class TelegramHub:
         self._addwallet_cb: Callable[[str, str], Awaitable[str]] | None = None
         self._rmwallet_cb: Callable[[str], Awaitable[str]] | None = None
         self._candidates_cb: Callable[[], Awaitable[str]] | None = None
+        self._train_cb: Callable[[], Awaitable[str]] | None = None
+        self._mlstatus_cb: Callable[[], Awaitable[str]] | None = None
         self._chat_id = config.telegram_chat_id
 
     def set_status_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
@@ -230,6 +236,12 @@ class TelegramHub:
 
     def set_candidates_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
         self._candidates_cb = cb
+
+    def set_train_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
+        self._train_cb = cb
+
+    def set_mlstatus_callback(self, cb: Callable[[], Awaitable[str]]) -> None:
+        self._mlstatus_cb = cb
 
     async def _start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
@@ -338,6 +350,14 @@ class TelegramHub:
 
     async def _candidates_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         text = await self._candidates_cb() if self._candidates_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def _train_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        text = await self._train_cb() if self._train_cb else "Hazır değil."
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+    async def _mlstatus_cmd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        text = await self._mlstatus_cb() if self._mlstatus_cb else "Hazır değil."
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
     async def _on_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

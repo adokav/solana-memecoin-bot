@@ -318,6 +318,46 @@ cüzdan otomatik disable edilir:
 Yeni kalite hesabı her `WALLET_OUTCOMES_INTERVAL` (default 10dk) bir
 çalışır. Disable olduğunda Telegram'a uyarı düşer.
 
+### ML scoring layer
+
+`ML_ENABLED=true` (default) ile aktif olur, ama model **eğitildiğinde**
+devreye girer. Eğitim için minimum `ML_MIN_SAMPLES` (30) kapanan trade
+gerekir (paper + real birleşik).
+
+- `ml.py`: logistic regression classifier (StandardScaler ile feature
+  normalize). Binary label: `pnl_pct >= ML_WIN_THRESHOLD_PCT` (30%).
+  15 feature: score breakdown bileşenleri + profile encoding + entry
+  liquidity (log) + entry top10 + UTC saat.
+- `/train` komutu: tüm closed pozisyonları (paper + real) toplar, model
+  eğitir, `data/ml_model.pkl`'a kaydeder. Class dengesizliği veya az
+  sample varsa graceful skip.
+- `/mlstatus`: model sample sayısı, test accuracy, eğitilme zamanı.
+- Screener inference: top max_alerts_per_scan adaylar için win
+  probability hesaplanır, `ml_predicted` score componenti olarak
+  eklenir. Prob 0.5 → 0 puan, 1.0 → +20, 0.0 → -20 (lineer mapping).
+
+Model yoksa veya scikit-learn yüklü değilse graceful skip — bot
+normal çalışır. Önerilen kullanım: 2-3 hafta paper veri biriktikten
+sonra `/train`, hafta başlarında re-train.
+
+### Quality-weighted smart signal
+
+Smart wallet alımları artık **wallet quality_score**'a göre ağırlıklı
+katkı yapar. Q=50 (nötr) → 1.0× ağırlık, Q=80 → 1.6×, Q=20 → 0.4×.
+Toplam ağırlık × 7 + 1 puan, max 25. Yani 2 yüksek-kalite cüzdan, 4
+düşük-kalite cüzdandan daha çok puan getirir.
+
+### Graduation transition (pump → Raydium)
+
+Pump pozisyonu graduate olduğunda bot **otomatik full-exit yerine**:
+1. DexScreener'da Raydium pair'i arar
+2. On-chain'den gerçek token bakiyesini çeker
+3. Position'ı `is_pump_pos=False` + `pair_address=<raydium>` ile
+   günceller, regular Monitor'a devreder
+
+Böylece post-grad pump'a (genelde 2-3x) binebiliyor. DS pair'i
+indexlemediyse (rare) full-exit fallback'i devreye girer.
+
 ### PumpPortal bonding curve trading
 
 `PUMPPORTAL_ENABLED=true` ile aktif. Pre-grad alert'lara `🐸 AL via
