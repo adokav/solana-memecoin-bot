@@ -13,6 +13,13 @@ import time
 from dataclasses import asdict
 
 from analog import analog_report
+from auto_tuner import analyze as autotune_analyze, format_report as autotune_format
+from charts import (
+    charts_available,
+    daily_pnl_png,
+    equity_curve_png,
+    score_distribution_png,
+)
 from circuit_breaker import CircuitBreaker
 from config import config
 from dashboard import start_dashboard, stop_dashboard
@@ -21,6 +28,7 @@ from helius import Helius
 from jupiter import Jupiter, LAMPORTS_PER_SOL
 from lunarcrush import LunarCrush
 from macro import MacroCollector, append_snapshot, format_snapshot, latest_snapshot
+from mev_monitor import MevStore, evaluate_fill, format_mev_status
 
 # ML opsiyonel: scikit-learn yüklü değilse graceful skip
 try:
@@ -71,6 +79,7 @@ from wallet_discovery import (
 )
 from storage import Position, Store
 from telegram_handler import TelegramHub, set_buy_callback, set_pump_buy_callback
+from twitter import TwitterScanner, format_twitter_status
 from wallet import load_keypair
 from wallet_pool import WalletPool, format_pool_status
 
@@ -141,6 +150,8 @@ class Bot:
         self.tg = TelegramHub()
         self.screener = Screener(
             self.ds, self.pf, self.smart_store, self.lunar, self.ml_bundle,
+            twitter_store=(self.twitter_scanner.store if self.twitter_scanner else None),
+            mev_store=self.mev_store,
         )
         self.signal_log = SignalLog()
         self.monitor = Monitor(
@@ -164,6 +175,11 @@ class Bot:
         self.macro = MacroCollector(self.pf) if config.macro_snapshot_enabled else None
         self.breaker = CircuitBreaker()
         self._dashboard_handles = None
+        self.mev_store = MevStore.load() if config.mev_monitor_enabled else None
+        self.twitter_scanner = (
+            TwitterScanner() if config.twitter_enabled and config.twitter_handles
+            else None
+        )
         self._stop = asyncio.Event()
         self._last_scan_ts: float = 0
         self._last_scan_count: int = 0
@@ -237,6 +253,13 @@ class Bot:
             return
 
         chosen_wallet = self.wallet_pool.pick_for_buy()
+        # MEV blacklist: bu DEX'te suspect oranı yüksekse atla
+        if self.mev_store is not None and self.mev_store.is_dex_cooled(c.dex):
+            await self.tg.info(
+                f"🛡 <b>${c.base_symbol}</b> atlandı — "
+                f"DEX <code>{c.dex}</code> MEV cooldown'da."
+            )
+            return
         log.info(
             "BUY %s amount=%.4f SOL (%s) wallet=%s",
             c.base_symbol, buy_amount, size_note, chosen_wallet.pubkey[:8],
@@ -246,6 +269,10 @@ class Bot:
             entry_holders = await self.rug.top_holders(c.base_token, n=20)
         except Exception:
             entry_holders = []
+        # MEV ölçümü için: alımdan önceki token bakiyesi
+        balance_before = await self._token_balance_raw(
+            c.base_token, owner_pubkey=chosen_wallet.pubkey,
+        )
         try:
             sig, tokens_raw = await self.jup.buy(
                 c.base_token, buy_amount, keypair=chosen_wallet.keypair,
@@ -254,6 +281,28 @@ class Bot:
             log.exception("buy failed")
             await self.tg.info(f"❌ Alım hatası ${c.base_symbol}: <code>{e}</code>")
             return
+
+        # MEV / sandwich kontrol
+        if self.mev_store is not None and tokens_raw > 0:
+            try:
+                balance_after = await self._token_balance_raw(
+                    c.base_token, owner_pubkey=chosen_wallet.pubkey,
+                )
+                actual_received = max(0, balance_after - balance_before)
+                slippage_bps = config.buy_slippage_bps
+                suspect, fill_ratio = evaluate_fill(
+                    tokens_raw, actual_received, slippage_bps,
+                )
+                self.mev_store.record(c.dex, suspect)
+                if suspect:
+                    await self.tg.info(
+                        f"⚠️ <b>${c.base_symbol}</b> MEV şüphesi — "
+                        f"fill <code>{fill_ratio * 100:.1f}%</code> "
+                        f"(beklenen {tokens_raw}, alınan {actual_received})\n"
+                        f"DEX: <code>{c.dex}</code>"
+                    )
+            except Exception:
+                log.exception("mev evaluation failed for %s", c.base_symbol)
 
         pos = Position(
             pair_address=c.pair_address,
@@ -617,6 +666,42 @@ class Bot:
             await self._pump_close_all(pos, price, f"SL {pnl_pct:.1f}%")
             return
 
+    # ---------- Loop: Twitter influencer polling ----------
+
+    async def twitter_loop(self) -> None:
+        await asyncio.sleep(45)
+        while not self._stop.is_set():
+            if self.twitter_scanner is not None:
+                try:
+                    await self.twitter_scanner.poll_all()
+                except Exception:
+                    log.exception("twitter loop error")
+            await asyncio.sleep(config.twitter_poll_interval)
+
+    # ---------- Loop: auto-tuner günlük rapor ----------
+
+    async def autotune_loop(self) -> None:
+        await asyncio.sleep(3600)  # boot'tan 1h sonra başla
+        while not self._stop.is_set():
+            if config.autotune_enabled:
+                try:
+                    positions = list(self.store.positions)
+                    if self.paper_store is not None:
+                        positions += list(self.paper_store.positions)
+                    report = autotune_analyze(positions)
+                    if report.suggestions or report.n_samples >= config.autotune_min_samples:
+                        text = autotune_format(report)
+                        if report.suggestions:
+                            await self.tg.info(text)
+                        # öneri yoksa sessiz, log'a düşer
+                        log.info(
+                            "auto-tune cycle: n=%d suggestions=%d",
+                            report.n_samples, len(report.suggestions),
+                        )
+                except Exception:
+                    log.exception("autotune loop error")
+            await asyncio.sleep(config.autotune_interval_hours * 3600)
+
     # ---------- Loop: otomatik pin snapshot ----------
 
     async def auto_pin_loop(self) -> None:
@@ -802,6 +887,55 @@ class Bot:
 
     async def walletpool_text(self) -> str:
         return format_pool_status(self.wallet_pool)
+
+    # ---------- /chart, /mev, /twitter, /tune ----------
+
+    async def chart_data(self, which: str) -> tuple[bytes | None, str]:
+        if not charts_available():
+            return None, "matplotlib yüklü değil"
+        which = (which or "pnl").lower()
+        if which in ("pnl", "equity", "real"):
+            png = equity_curve_png(self.store.positions, title_suffix="(real)")
+            return png, "📈 Real equity curve"
+        if which == "paper":
+            if self.paper_store is None:
+                return None, "paper kapalı"
+            png = equity_curve_png(self.paper_store.positions, title_suffix="(paper)")
+            return png, "📈 Paper equity curve"
+        if which == "daily":
+            png = daily_pnl_png(self.store.positions, days=14)
+            return png, "📊 Daily PnL (son 14 gün)"
+        if which == "score":
+            png = score_distribution_png(self.store.positions)
+            return png, "📊 Skor dağılımı (real)"
+        if which == "score_paper":
+            if self.paper_store is None:
+                return None, "paper kapalı"
+            png = score_distribution_png(self.paper_store.positions)
+            return png, "📊 Skor dağılımı (paper)"
+        return None, f"Bilinmeyen chart: {which} (pnl/paper/daily/score)"
+
+    async def mev_text(self) -> str:
+        if self.mev_store is None:
+            return "🛡 MEV monitor kapalı (MEV_MONITOR_ENABLED=false)."
+        from mev_monitor import format_mev_status
+        return format_mev_status(self.mev_store)
+
+    async def twitter_text(self) -> str:
+        if self.twitter_scanner is None:
+            return (
+                "🐦 Twitter kapalı.\n"
+                "Aktif etmek için: TWITTER_ENABLED=true + "
+                "TWITTER_HANDLES=user1,user2,..."
+            )
+        return format_twitter_status(self.twitter_scanner.store)
+
+    async def tune_text(self) -> str:
+        positions = list(self.store.positions)
+        if self.paper_store is not None:
+            positions += list(self.paper_store.positions)
+        report = autotune_analyze(positions)
+        return autotune_format(report)
 
     # ---------- /status ----------
 
@@ -1209,6 +1343,10 @@ class Bot:
         self.tg.set_pin_callback(self.pin_text)
         self.tg.set_bandit_callback(self.bandit_text)
         self.tg.set_walletpool_callback(self.walletpool_text)
+        self.tg.set_chart_callback(self.chart_data)
+        self.tg.set_mev_callback(self.mev_text)
+        self.tg.set_twitter_callback(self.twitter_text)
+        self.tg.set_tune_callback(self.tune_text)
 
         await self.tg.start()
         try:
@@ -1254,6 +1392,10 @@ class Bot:
             tasks.append(asyncio.create_task(self.pump_monitor_loop(), name="pump_monitor"))
         if config.pin_auto_enabled:
             tasks.append(asyncio.create_task(self.auto_pin_loop(), name="auto_pin"))
+        if self.twitter_scanner is not None:
+            tasks.append(asyncio.create_task(self.twitter_loop(), name="twitter"))
+        if config.autotune_enabled:
+            tasks.append(asyncio.create_task(self.autotune_loop(), name="autotune"))
 
         await self._stop.wait()
         log.info("shutting down...")
@@ -1285,6 +1427,8 @@ class Bot:
             await self.lunar.close()
         if self.pumpportal is not None:
             await self.pumpportal.close()
+        if self.twitter_scanner is not None:
+            await self.twitter_scanner.close()
 
 
 def main() -> None:
