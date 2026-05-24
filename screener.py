@@ -13,6 +13,7 @@ from typing import Literal
 
 from config import config
 from dexscreener import DexScreener
+from lunarcrush import LunarCrush
 from pumpfun import PumpFun
 from smart_wallets import SmartWalletStore
 
@@ -193,6 +194,7 @@ PROFILE_WEIGHTS = {
         "liq_quality": 0.7,    # FDV/liq erken aşamada genellikle çarpık
         "holder_health": 1.0,
         "smart_signal": 1.1,   # erken aşamada smart wallet alımı çok kıymetli
+        "social_external": 0.9,  # yeni tokenlarda LunarCrush coverage zayıf
     },
     "trend": {
         "momentum": 0.9,
@@ -204,6 +206,7 @@ PROFILE_WEIGHTS = {
         "liq_quality": 1.3,    # ciddi tokenlar düzgün liq/fdv oranına sahip olmalı
         "holder_health": 1.0,
         "smart_signal": 1.0,
+        "social_external": 1.3,  # trend için LunarCrush coverage iyi, yüksek ağırlık
     },
 }
 
@@ -314,10 +317,12 @@ class Screener:
         ds: DexScreener,
         pf: PumpFun | None = None,
         smart: SmartWalletStore | None = None,
+        lunar: LunarCrush | None = None,
     ) -> None:
         self.ds = ds
         self.pf = pf
         self.smart = smart
+        self.lunar = lunar
         # {base_token: (last_alerted_ts, score)}  score=0 → red (rug/honeypot), uzun cooldown
         self._cooldown: dict[str, tuple[float, float]] = {}
         # {base_token: [(ts, liquidity_usd), ...]}  son N dakikadaki likidite snapshot'ları
@@ -491,4 +496,33 @@ class Screener:
             log.info("profile samples: %s", " | ".join(sample_reasons["profile"]))
 
         candidates.sort(key=lambda x: x.score, reverse=True)
+
+        # LunarCrush enrich — sadece alert'lanmaya en yakın top adaylar için
+        # (free tier rate limit budget'ı koru)
+        if (
+            self.lunar is not None
+            and config.lunarcrush_enabled
+            and config.lunarcrush_api_key
+        ):
+            top_for_lunar = candidates[: max(1, config.max_alerts_per_scan)]
+            for c in top_for_lunar:
+                try:
+                    metrics = await self.lunar.coin_metrics(c.base_symbol)
+                except Exception:
+                    metrics = None
+                if metrics is None or metrics.galaxy_score <= 0:
+                    c.score_breakdown["social_external"] = 0
+                    continue
+                # galaxy_score 0-100 → max 15 puan (profile weight uygulanır)
+                raw = metrics.galaxy_score / 100.0 * 15.0
+                # Profile-aware ağırlık manuel uygulanır (sonradan eklendiği için
+                # _score'un toplu apply'ı çoktan geçti)
+                weights = PROFILE_WEIGHTS.get(c.profile, {})
+                weighted = raw * weights.get("social_external", 1.0)
+                c.score_breakdown["social_external"] = round(weighted, 1)
+                c.score = round(sum(c.score_breakdown.values()), 1)
+
+            # Yeniden sırala
+            candidates.sort(key=lambda x: x.score, reverse=True)
+
         return candidates

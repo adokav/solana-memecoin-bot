@@ -18,12 +18,14 @@ from config import config
 from dexscreener import DexScreener
 from helius import Helius
 from jupiter import Jupiter, LAMPORTS_PER_SOL
+from lunarcrush import LunarCrush
 from macro import MacroCollector, append_snapshot, format_snapshot, latest_snapshot
 from monitor import Monitor
 from paper import PaperMonitor, PaperStore
 from pnl import format_report, summarize
 from prepump import PrePumpDetector, format_prepump_alert
-from pumpfun import PumpFun
+from pumpfun import PUMP_GRADUATION_MC_USD, PumpFun
+from pumpportal import PumpPortal, PumpPortalError
 from rugcheck import RugCheckClient, SafetyReport
 from screener import Candidate, Screener
 from signal_log import SignalLog
@@ -41,7 +43,7 @@ from wallet_discovery import (
     format_candidates_text,
 )
 from storage import Position, Store
-from telegram_handler import TelegramHub, set_buy_callback
+from telegram_handler import TelegramHub, set_buy_callback, set_pump_buy_callback
 from wallet import load_keypair
 
 logging.basicConfig(
@@ -59,6 +61,9 @@ class Bot:
         self.prepump: PrePumpDetector | None = (
             PrePumpDetector(self.pf)
             if self.pf is not None and config.prepump_enabled else None
+        )
+        self.lunar: LunarCrush | None = (
+            LunarCrush() if config.lunarcrush_enabled and config.lunarcrush_api_key else None
         )
         self.helius: Helius | None = (
             Helius() if config.smart_wallets_enabled and config.helius_api_key else None
@@ -87,9 +92,13 @@ class Bot:
         self.discovery: WalletDiscovery | None = None  # signal_log init sonrası set edilecek
         self.jup = Jupiter(kp)
         self.rug = RugCheckClient()
+        self.pumpportal: PumpPortal | None = (
+            PumpPortal(kp, self.jup.rpc)
+            if config.pumpportal_enabled else None
+        )
         self.store = Store.load()
         self.tg = TelegramHub()
-        self.screener = Screener(self.ds, self.pf, self.smart_store)
+        self.screener = Screener(self.ds, self.pf, self.smart_store, self.lunar)
         self.signal_log = SignalLog()
         self.monitor = Monitor(
             self.ds, self.jup, self.store, self.tg,
@@ -234,6 +243,203 @@ class Bot:
             await self.on_buy(c, safety)
         except Exception:
             log.exception("auto-buy error for %s", c.base_symbol)
+
+    # ---------- Pre-grad pump buy callback ----------
+
+    async def on_pump_buy(self, mint: str, symbol: str, sol_amount: float) -> None:
+        if self.pumpportal is None:
+            await self.tg.info("⚠️ PumpPortal kapalı (PUMPPORTAL_ENABLED=false).")
+            return
+        if self.breaker.is_open():
+            await self.tg.info(
+                f"⛔ Pump alım iptal — devre kesici açık.\n"
+                f"Sebep: <code>{self.breaker.state.reason}</code>"
+            )
+            return
+        # Aynı mint için açık pump pozisyon varsa skip
+        for p in self.store.open_positions():
+            if p.base_token == mint and p.is_pump_pos:
+                await self.tg.info(f"⚠️ ${symbol} için zaten açık pump pozisyon var.")
+                return
+
+        log.info("PUMPPORTAL BUY %s amount=%s SOL", symbol, sol_amount)
+        try:
+            sig = await self.pumpportal.buy(
+                mint, sol_amount,
+                slippage_pct=config.pumpportal_slippage_pct,
+                priority_fee_sol=config.pumpportal_priority_fee_sol,
+            )
+        except PumpPortalError as e:
+            log.exception("pumpportal buy failed")
+            await self.tg.info(
+                f"❌ PumpPortal alımı başarısız ${symbol}: <code>{e}</code>"
+            )
+            return
+        except Exception as e:
+            log.exception("pumpportal buy unexpected")
+            await self.tg.info(
+                f"❌ Pump alım hatası ${symbol}: <code>{e}</code>"
+            )
+            return
+
+        # Anlık fiyatı çekmeye çalış (peak/SL hesabı için referans)
+        entry_price_usd = 0.0
+        if self.pf is not None:
+            coin_data = await self.pf.coin_info(mint)
+            if coin_data:
+                entry_price_usd = self._pump_price_from_coin(coin_data)
+
+        pos = Position(
+            pair_address="",  # pump pozisyonları DS pair'i yok
+            base_token=mint,
+            symbol=symbol,
+            entry_price_usd=entry_price_usd or 1e-9,  # 0 olmasın diye epsilon
+            peak_price_usd=entry_price_usd or 1e-9,
+            amount_raw=1,  # pump pos partial sell yok, placeholder
+            remaining_raw=1,
+            sol_spent=sol_amount,
+            opened_at=time.time(),
+            tx_open=sig,
+            profile="pump",
+            score=0,
+            original_entry_price_usd=entry_price_usd or 1e-9,
+            is_pump_pos=True,
+        )
+        self.store.add(pos)
+
+        await self.tg.info(
+            f"🐸 <b>${symbol}</b> PUMP ALINDI!\n"
+            f"Harcanan: <code>{sol_amount} SOL</code>\n"
+            f"Giriş fiyatı: <code>${entry_price_usd:.8f}</code>\n\n"
+            f"<b>Pump exit planı:</b>\n"
+            f"• Trailing stop -%{config.trailing_stop:.0f}\n"
+            f"• Hard SL -%{config.stop_loss:.0f}\n"
+            f"• Graduation = otomatik full exit\n\n"
+            f"<a href=\"https://solscan.io/tx/{sig}\">solscan</a>"
+        )
+
+    @staticmethod
+    def _pump_price_from_coin(coin_data: dict) -> float:
+        """Pump.fun coin verisinden token fiyatını (USD) hesaplar."""
+        try:
+            vsr = float(coin_data.get("virtual_sol_reserves") or 0)
+            vtr = float(coin_data.get("virtual_token_reserves") or 0)
+            sol_usd = float(coin_data.get("sol_price") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        if vsr <= 0 or vtr <= 0:
+            return 0.0
+        # Decimals: SOL=9, pump tokens=6
+        sol_amount = vsr / 1e9
+        token_amount = vtr / 1e6
+        if token_amount <= 0:
+            return 0.0
+        price_in_sol = sol_amount / token_amount
+        if sol_usd <= 0:
+            # sol_price coin endpoint'inde varsa kullan, yoksa MC'den türet
+            mc = float(coin_data.get("usd_market_cap") or 0)
+            total_supply = float(coin_data.get("total_supply") or 0) / 1e6
+            if mc > 0 and total_supply > 0:
+                return mc / total_supply
+            return 0.0
+        return price_in_sol * sol_usd
+
+    async def _pump_close_all(self, pos: Position, price: float, reason: str) -> None:
+        if self.pumpportal is None:
+            log.warning("pump close attempted but pumpportal is None")
+            return
+        try:
+            sig = await self.pumpportal.sell(
+                pos.base_token, percent=100,
+                slippage_pct=config.pumpportal_slippage_pct,
+                priority_fee_sol=config.pumpportal_priority_fee_sol,
+            )
+        except Exception as e:
+            log.exception("pump close failed for %s", pos.symbol)
+            await self.tg.info(
+                f"❌ Pump satışı başarısız ${pos.symbol}: <code>{e}</code>"
+            )
+            return
+
+        # SOL geliri için yaklaşık hesap: price × ratio
+        pnl_pct = (
+            (price - pos.entry_price_usd) / pos.entry_price_usd * 100
+            if pos.entry_price_usd > 0 else 0
+        )
+        approx_received = pos.sol_spent * (1 + pnl_pct / 100)
+        pos.sol_received_total = approx_received
+        pos.remaining_raw = 0
+        pos.pnl_pct = pnl_pct
+        pos.status = "closed"
+        pos.closed_at = time.time()
+        pos.close_reason = reason
+        self.store.update()
+
+        emoji = "🟢" if pnl_pct >= 0 else "🔴"
+        await self.tg.info(
+            f"{emoji} <b>${pos.symbol}</b> PUMP KAPANDI ({reason})\n"
+            f"PnL: <code>{pnl_pct:+.2f}%</code>\n"
+            f"Giriş: <code>{pos.sol_spent:.4f} SOL</code> → "
+            f"Çıkış (tahmini): <code>{approx_received:.4f} SOL</code>\n"
+            f"<a href=\"https://solscan.io/tx/{sig}\">solscan</a>"
+        )
+
+    async def _tick_pump_position(self, pos: Position) -> None:
+        if self.pf is None or self.pumpportal is None:
+            return
+        coin_data = await self.pf.coin_info(pos.base_token)
+        if not coin_data:
+            return
+
+        # Graduate olduysa otomatik full exit (Raydium'a göç riski +
+        # PumpPortal bonding curve sell'i artık çalışmaz)
+        if bool(coin_data.get("complete")):
+            current_price = self._pump_price_from_coin(coin_data)
+            await self._pump_close_all(
+                pos, current_price or pos.entry_price_usd,
+                "graduated (auto-exit)",
+            )
+            return
+
+        price = self._pump_price_from_coin(coin_data)
+        if price <= 0:
+            return
+
+        if price > pos.peak_price_usd:
+            pos.peak_price_usd = price
+            self.store.update()
+
+        pnl_pct = (price - pos.entry_price_usd) / pos.entry_price_usd * 100
+        drawdown = (pos.peak_price_usd - price) / pos.peak_price_usd * 100
+
+        # Pump pos için partial TP yok — trailing veya SL
+        trail_pct = pos.trailing_stop_override_pct or config.trailing_stop
+        if drawdown >= trail_pct and pnl_pct > 0:
+            # Sadece kârda iken trailing — başlangıçta dump'tan SL koruyor
+            await self._pump_close_all(
+                pos, price, f"trailing -{drawdown:.1f}% from peak",
+            )
+            return
+        if pnl_pct <= -config.stop_loss:
+            await self._pump_close_all(pos, price, f"SL {pnl_pct:.1f}%")
+            return
+
+    # ---------- Loop: pump position monitor ----------
+
+    async def pump_monitor_loop(self) -> None:
+        await asyncio.sleep(15)
+        while not self._stop.is_set():
+            try:
+                for pos in list(self.store.open_positions()):
+                    if not pos.is_pump_pos:
+                        continue
+                    try:
+                        await self._tick_pump_position(pos)
+                    except Exception:
+                        log.exception("pump tick error for %s", pos.symbol)
+            except Exception:
+                log.exception("pump monitor loop error")
+            await asyncio.sleep(config.pump_monitor_interval)
 
     # ---------- /halt /resume ----------
 
@@ -503,10 +709,17 @@ class Bot:
                             coin.symbol, coin.usd_market_cap,
                             coin.progress_pct, velocity,
                         )
+                        text = format_prepump_alert(coin, velocity)
                         try:
-                            await self.tg.info(
-                                format_prepump_alert(coin, velocity)
-                            )
+                            if self.pumpportal is not None:
+                                # Inline butonlu alert — manuel onayla PumpPortal alımı
+                                await self.tg.pump_alert(
+                                    coin.mint, coin.symbol, text,
+                                    config.pumpportal_buy_amount_sol,
+                                )
+                            else:
+                                # PumpPortal kapalı → sadece bilgi alert
+                                await self.tg.info(text)
                         except Exception:
                             log.exception("prepump telegram alert failed")
                 except Exception:
@@ -649,6 +862,7 @@ class Bot:
 
     async def run(self) -> None:
         set_buy_callback(self.on_buy)
+        set_pump_buy_callback(self.on_pump_buy)
         self.tg.set_status_callback(self.status_text)
         self.tg.set_health_callback(self.health_text)
         self.tg.set_perf_callback(self.perf_text)
@@ -700,6 +914,8 @@ class Bot:
             tasks.append(asyncio.create_task(self.discovery_loop(), name="discovery"))
         if self.prepump is not None:
             tasks.append(asyncio.create_task(self.prepump_loop(), name="prepump"))
+        if self.pumpportal is not None:
+            tasks.append(asyncio.create_task(self.pump_monitor_loop(), name="pump_monitor"))
 
         await self._stop.wait()
         log.info("shutting down...")
@@ -723,6 +939,10 @@ class Bot:
             await self.macro.close()
         if self.helius is not None:
             await self.helius.close()
+        if self.lunar is not None:
+            await self.lunar.close()
+        if self.pumpportal is not None:
+            await self.pumpportal.close()
 
 
 def main() -> None:
