@@ -20,6 +20,18 @@ from helius import Helius
 from jupiter import Jupiter, LAMPORTS_PER_SOL
 from lunarcrush import LunarCrush
 from macro import MacroCollector, append_snapshot, format_snapshot, latest_snapshot
+
+# ML opsiyonel: scikit-learn yüklü değilse graceful skip
+try:
+    from ml import (
+        format_ml_status,
+        load_model,
+        save_model,
+        train_from_positions,
+    )
+    _ML_OK = True
+except Exception:
+    _ML_OK = False
 from monitor import Monitor
 from paper import PaperMonitor, PaperStore
 from pnl import format_report, summarize
@@ -65,6 +77,17 @@ class Bot:
         self.lunar: LunarCrush | None = (
             LunarCrush() if config.lunarcrush_enabled and config.lunarcrush_api_key else None
         )
+        self.ml_bundle = None
+        if _ML_OK and config.ml_enabled:
+            try:
+                self.ml_bundle = load_model()
+                if self.ml_bundle is not None:
+                    log.info(
+                        "ml model loaded: n=%d acc=%.2f",
+                        self.ml_bundle.n_samples, self.ml_bundle.test_accuracy,
+                    )
+            except Exception:
+                log.exception("ml model load failed")
         self.helius: Helius | None = (
             Helius() if config.smart_wallets_enabled and config.helius_api_key else None
         )
@@ -98,7 +121,9 @@ class Bot:
         )
         self.store = Store.load()
         self.tg = TelegramHub()
-        self.screener = Screener(self.ds, self.pf, self.smart_store, self.lunar)
+        self.screener = Screener(
+            self.ds, self.pf, self.smart_store, self.lunar, self.ml_bundle,
+        )
         self.signal_log = SignalLog()
         self.monitor = Monitor(
             self.ds, self.jup, self.store, self.tg,
@@ -344,6 +369,105 @@ class Bot:
             return 0.0
         return price_in_sol * sol_usd
 
+    async def _token_balance_raw(self, mint: str) -> int:
+        """Cüzdandaki SPL token bakiyesini raw birim olarak döner.
+
+        Pump→Raydium transition'da gerçek miktarı bilmek için.
+        """
+        try:
+            from solders.pubkey import Pubkey
+            from solana.rpc.types import TokenAccountOpts
+            owner = Pubkey.from_string(self.wallet_pubkey)
+            mint_pk = Pubkey.from_string(mint)
+            opts = TokenAccountOpts(mint=mint_pk)
+            resp = await self.jup.rpc.get_token_accounts_by_owner_json_parsed(
+                owner, opts,
+            )
+            accounts = resp.value if resp and resp.value else []
+            total = 0
+            for acc in accounts:
+                try:
+                    info = acc.account.data.parsed["info"]
+                    amount = int(info["tokenAmount"]["amount"])
+                    total += amount
+                except (KeyError, TypeError, AttributeError):
+                    continue
+            return total
+        except Exception:
+            log.exception("token balance lookup failed for %s", mint[:8])
+            return 0
+
+    async def _try_graduation_transition(
+        self, pos: Position, coin_data: dict,
+    ) -> bool:
+        """Graduate olan pump pozisyonunu Raydium-tracked'a transition et.
+
+        Başarılıysa True döner — bot artık bu pozisyonu regular Monitor'la
+        izler. Başarısızsa False (caller fallback olarak full-exit yapar).
+        """
+        # 1. DS'de Raydium pair'i ara
+        pairs = await self.ds.pairs_for_token("solana", pos.base_token)
+        if not pairs:
+            log.warning(
+                "graduation transition: DS pair not yet indexed for %s, "
+                "will retry next tick", pos.symbol,
+            )
+            return False
+        pairs.sort(
+            key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0),
+            reverse=True,
+        )
+        top_pair = pairs[0]
+        pair_address = top_pair.get("pairAddress")
+        if not pair_address:
+            return False
+
+        # 2. Gerçek token miktarını on-chain'den çek
+        token_balance = await self._token_balance_raw(pos.base_token)
+        if token_balance <= 0:
+            log.warning(
+                "graduation transition: zero token balance for %s, "
+                "full-exit fallback", pos.symbol,
+            )
+            return False
+
+        # 3. Anlık fiyatı al
+        try:
+            current_price = float(top_pair.get("priceUsd") or 0)
+        except (TypeError, ValueError):
+            current_price = 0.0
+        if current_price <= 0:
+            current_price = pos.entry_price_usd
+
+        # 4. Pozisyonu Raydium-tracked'a çevir
+        pos.is_pump_pos = False
+        pos.pair_address = pair_address
+        pos.amount_raw = token_balance
+        pos.remaining_raw = token_balance
+        # entry_price_usd'i koru (orijinal giriş, PnL doğru hesaplansın)
+        # Liquidity baseline güncelle — yeni Raydium pair, drain check
+        # için referans
+        try:
+            new_liq = float((top_pair.get("liquidity") or {}).get("usd") or 0)
+        except (TypeError, ValueError):
+            new_liq = pos.entry_liquidity_usd or 0
+        if new_liq > 0:
+            pos.entry_liquidity_usd = new_liq
+        # Peak fiyatını mevcut Raydium fiyatına resetle (yeni AMM, trailing
+        # referansı sıfırlansın)
+        if current_price > pos.peak_price_usd:
+            pos.peak_price_usd = current_price
+        self.store.update()
+
+        await self.tg.info(
+            f"🎓 <b>${pos.symbol}</b> GRADUATED → Raydium'a transition\n"
+            f"Pair: <code>{pair_address[:8]}..{pair_address[-4:]}</code>\n"
+            f"Token bakiye: <code>{token_balance:,}</code> raw\n"
+            f"Anlık fiyat: <code>${current_price:.8f}</code>\n"
+            f"Bot artık regular Monitor'la izleyecek (post-grad pump'a açık)"
+        )
+        return True
+
     async def _pump_close_all(self, pos: Position, price: float, reason: str) -> None:
         if self.pumpportal is None:
             log.warning("pump close attempted but pumpportal is None")
@@ -391,13 +515,18 @@ class Bot:
         if not coin_data:
             return
 
-        # Graduate olduysa otomatik full exit (Raydium'a göç riski +
-        # PumpPortal bonding curve sell'i artık çalışmaz)
+        # Graduate olduysa: post-grad pump'a binmek için Raydium'a transition et
+        # (DS pair'i bulamazsak fallback olarak PumpPortal full-exit)
         if bool(coin_data.get("complete")):
+            transitioned = await self._try_graduation_transition(pos, coin_data)
+            if transitioned:
+                # Position artık is_pump_pos=False, regular Monitor'a devredilecek
+                return
+            # Fallback: bonding curve'de hâlâ trade edilebiliyorken kapan
             current_price = self._pump_price_from_coin(coin_data)
             await self._pump_close_all(
                 pos, current_price or pos.entry_price_usd,
-                "graduated (auto-exit)",
+                "graduated (Raydium pair bulunamadı, full exit)",
             )
             return
 
@@ -490,6 +619,44 @@ class Bot:
         if self.candidate_store is None:
             return "📭 Wallet discovery kapalı (DISCOVERY_ENABLED=false)."
         return format_candidates_text(self.candidate_store)
+
+    # ---------- /train, /mlstatus ----------
+
+    async def train_text(self) -> str:
+        if not _ML_OK:
+            return "⚠️ ML kütüphaneleri yüklü değil (scikit-learn)."
+        # Real + paper closed pozisyonların birleşimi
+        positions = list(self.store.positions)
+        if self.paper_store is not None:
+            positions += list(self.paper_store.positions)
+        try:
+            bundle = train_from_positions(positions)
+        except Exception as e:
+            log.exception("ml train error")
+            return f"❌ Eğitim hatası: <code>{e}</code>"
+        if bundle is None:
+            closed = sum(1 for p in positions if p.status == "closed")
+            return (
+                f"⚠️ Yetersiz veri: <code>{closed}</code> kapanan trade, "
+                f"min <code>{config.ml_min_samples}</code> gerekli "
+                "(veya class dengesizliği). Paper biriksin sonra tekrar dene."
+            )
+        save_model(bundle)
+        self.ml_bundle = bundle
+        self.screener.ml_bundle = bundle
+        return (
+            f"✅ <b>ML model eğitildi</b>\n"
+            f"Sample: <code>{bundle.n_samples}</code>\n"
+            f"Test accuracy: <code>{bundle.test_accuracy * 100:.0f}%</code>\n"
+            f"Train win rate: <code>{bundle.win_rate * 100:.0f}%</code>\n"
+            f"Bot artık skor sistemine <code>ml_predicted</code> "
+            f"componentini ekleyecek."
+        )
+
+    async def mlstatus_text(self) -> str:
+        if not _ML_OK:
+            return "⚠️ ML kütüphaneleri yüklü değil (scikit-learn)."
+        return format_ml_status(self.ml_bundle)
 
     # ---------- /status ----------
 
@@ -877,6 +1044,8 @@ class Bot:
         self.tg.set_addwallet_callback(self.addwallet_text)
         self.tg.set_rmwallet_callback(self.rmwallet_text)
         self.tg.set_candidates_callback(self.candidates_text)
+        self.tg.set_train_callback(self.train_text)
+        self.tg.set_mlstatus_callback(self.mlstatus_text)
 
         await self.tg.start()
         await self.tg.info(

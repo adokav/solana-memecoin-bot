@@ -17,6 +17,13 @@ from lunarcrush import LunarCrush
 from pumpfun import PumpFun
 from smart_wallets import SmartWalletStore
 
+try:
+    from ml import ModelBundle, extract_features_from_dict, predict_win_probability
+    _ML_IMPORT_OK = True
+except Exception:
+    _ML_IMPORT_OK = False
+    ModelBundle = None  # type: ignore
+
 log = logging.getLogger(__name__)
 
 Profile = Literal["early", "trend"]
@@ -195,6 +202,7 @@ PROFILE_WEIGHTS = {
         "holder_health": 1.0,
         "smart_signal": 1.1,   # erken aşamada smart wallet alımı çok kıymetli
         "social_external": 0.9,  # yeni tokenlarda LunarCrush coverage zayıf
+        "ml_predicted": 1.0,     # ML zaten profile feature'ını kullanıyor
     },
     "trend": {
         "momentum": 0.9,
@@ -207,6 +215,7 @@ PROFILE_WEIGHTS = {
         "holder_health": 1.0,
         "smart_signal": 1.0,
         "social_external": 1.3,  # trend için LunarCrush coverage iyi, yüksek ağırlık
+        "ml_predicted": 1.0,
     },
 }
 
@@ -220,7 +229,7 @@ def _apply_profile_weights(breakdown: dict, profile: str) -> dict:
     return {k: round(v * weights.get(k, 1.0), 1) for k, v in breakdown.items()}
 
 
-def _score(c: Candidate, smart_unique_wallets: int = 0) -> tuple[float, dict]:
+def _score(c: Candidate, smart_weight: float = 0.0) -> tuple[float, dict]:
     breakdown: dict = {}
 
     # Momentum (max 25)
@@ -293,14 +302,12 @@ def _score(c: Candidate, smart_unique_wallets: int = 0) -> tuple[float, dict]:
     # Holder sağlığı placeholder (max 10) - rugcheck.py'de doldurulacak
     breakdown["holder_health"] = 0
 
-    # Smart wallet sinyali (max 25) — en güçlü erken sinyal
-    # 1 wallet = 8, 2 = 16, 3 = 22, 4+ = 25
+    # Smart wallet sinyali (max 25) — quality-weighted
+    # Bir cüzdan quality_score/50 oranında katılır (Q=50 → 1.0, Q=80 → 1.6)
+    # raw_weight 1.0 = ~8 puan, doygun olarak 4.0 → 25 puan
     smart_signal = 0.0
-    if smart_unique_wallets >= 1:
-        if smart_unique_wallets >= 4:
-            smart_signal = 25.0
-        else:
-            smart_signal = min(25.0, smart_unique_wallets * 7.5 + 0.5)
+    if smart_weight > 0:
+        smart_signal = min(25.0, smart_weight * 7.0 + 1.0)
     breakdown["smart_signal"] = round(smart_signal, 1)
 
     # Profile-aware ağırlıklar (varsa)
@@ -318,11 +325,13 @@ class Screener:
         pf: PumpFun | None = None,
         smart: SmartWalletStore | None = None,
         lunar: LunarCrush | None = None,
+        ml_bundle=None,
     ) -> None:
         self.ds = ds
         self.pf = pf
         self.smart = smart
         self.lunar = lunar
+        self.ml_bundle = ml_bundle  # ModelBundle veya None
         # {base_token: (last_alerted_ts, score)}  score=0 → red (rug/honeypot), uzun cooldown
         self._cooldown: dict[str, tuple[float, float]] = {}
         # {base_token: [(ts, liquidity_usd), ...]}  son N dakikadaki likidite snapshot'ları
@@ -472,10 +481,10 @@ class Screener:
                     )
                 continue
 
-            smart_unique = 0
+            smart_weight = 0.0
             if self.smart is not None and config.smart_wallets_enabled:
-                smart_unique = self.smart.unique_wallets_for(c.base_token)
-            score, breakdown = _score(c, smart_unique_wallets=smart_unique)
+                smart_weight = self.smart.weighted_smart_signal(c.base_token)
+            score, breakdown = _score(c, smart_weight=smart_weight)
             c.score = score
             c.score_breakdown = breakdown
 
@@ -523,6 +532,33 @@ class Screener:
                 c.score = round(sum(c.score_breakdown.values()), 1)
 
             # Yeniden sırala
+            candidates.sort(key=lambda x: x.score, reverse=True)
+
+        # ML predicted-win-prob enrichment — model yüklü ise top adaylar için
+        if (
+            _ML_IMPORT_OK
+            and self.ml_bundle is not None
+            and config.ml_enabled
+        ):
+            top_for_ml = candidates[: max(1, config.max_alerts_per_scan)]
+            for c in top_for_ml:
+                hour_utc = int(time.gmtime(time.time()).tm_hour)
+                features = extract_features_from_dict(
+                    c.score_breakdown,
+                    c.profile,
+                    c.liquidity_usd,
+                    0.0,  # entry_top10_pct entry'de henüz bilinmiyor
+                    hour_utc,
+                )
+                try:
+                    win_prob = predict_win_probability(self.ml_bundle, features)
+                except Exception:
+                    log.exception("ml predict failed")
+                    win_prob = 0.5
+                ml_points = (win_prob - 0.5) * 2 * config.ml_max_score_points
+                # Mid değer 0.5 → 0 puan, 1.0 → +ml_max, 0.0 → -ml_max
+                c.score_breakdown["ml_predicted"] = round(ml_points, 1)
+                c.score = round(sum(c.score_breakdown.values()), 1)
             candidates.sort(key=lambda x: x.score, reverse=True)
 
         return candidates

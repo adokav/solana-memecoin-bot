@@ -220,6 +220,24 @@ class SmartWalletStore:
         buys = self.buys_for(token_mint)
         return len({b.wallet for b in buys if b.wallet in active})
 
+    def weighted_smart_signal(self, token_mint: str) -> float:
+        """Quality-weighted katkı. Her aktif cüzdan kendi quality_score/50
+        ağırlığıyla katılır (Q=50 nötr → 1.0 ağırlık, Q=80 → 1.6, Q=20 → 0.4).
+        """
+        active = self._active_addrs()
+        buys = self.buys_for(token_mint)
+        seen: dict[str, float] = {}
+        for b in buys:
+            if b.wallet not in active:
+                continue
+            if b.wallet in seen:
+                continue
+            w = self.wallets.get(b.wallet)
+            if w is None:
+                continue
+            seen[b.wallet] = max(0.0, min(2.0, w.quality_score / 50.0))
+        return sum(seen.values())
+
     def tokens_with_min_buys(self, min_buys: int) -> list[str]:
         self.cleanup_recent_buys()
         active = self._active_addrs()

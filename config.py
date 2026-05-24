@@ -230,6 +230,15 @@ class Config:
     lunarcrush_enabled: bool = field(default_factory=lambda: _bool("LUNARCRUSH_ENABLED", True))
     lunarcrush_api_key: str = field(default_factory=lambda: _str("LUNARCRUSH_API_KEY", ""))
 
+    # --- ML scoring (paper + real closed trade'lerden öğrenir) ---
+    ml_enabled: bool = field(default_factory=lambda: _bool("ML_ENABLED", True))
+    # Bir trade kazanan sayılması için min pnl_pct
+    ml_win_threshold_pct: float = field(default_factory=lambda: _float("ML_WIN_THRESHOLD_PCT", 30))
+    # Train için minimum kapanan sample sayısı
+    ml_min_samples: int = field(default_factory=lambda: _int("ML_MIN_SAMPLES", 30))
+    # ML predicted_win_prob'tan kazanılan max skor puanı
+    ml_max_score_points: float = field(default_factory=lambda: _float("ML_MAX_SCORE_POINTS", 20))
+
     # --- Kaynak + skor: Smart wallet tracking ---
     smart_wallets_enabled: bool = field(default_factory=lambda: _bool("SMART_WALLETS_ENABLED", True))
     # İlk run'da dosya yoksa env'den seed: "addr1:label1,addr2:label2,..."
