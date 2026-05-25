@@ -176,6 +176,17 @@ class Bot:
         )
         self.store = Store.load()
         self.tg = TelegramHub()
+        # NOT: Screener init'inden ÖNCE scanner / store'ları kur
+        self.mev_store = MevStore.load() if config.mev_monitor_enabled else None
+        self.twitter_scanner = (
+            TwitterScanner() if config.twitter_enabled and config.twitter_handles
+            else None
+        )
+        self.tg_channels_scanner = (
+            TelegramChannelScanner()
+            if config.telegram_channels_enabled and config.telegram_channels
+            else None
+        )
         self.screener = Screener(
             self.ds, self.pf, self.smart_store, self.lunar, self.ml_bundle,
             twitter_store=(self.twitter_scanner.store if self.twitter_scanner else None),
@@ -205,16 +216,6 @@ class Bot:
         self.macro = MacroCollector(self.pf) if config.macro_snapshot_enabled else None
         self.breaker = CircuitBreaker()
         self._dashboard_handles = None
-        self.mev_store = MevStore.load() if config.mev_monitor_enabled else None
-        self.twitter_scanner = (
-            TwitterScanner() if config.twitter_enabled and config.twitter_handles
-            else None
-        )
-        self.tg_channels_scanner = (
-            TelegramChannelScanner()
-            if config.telegram_channels_enabled and config.telegram_channels
-            else None
-        )
         self._stop = asyncio.Event()
         self._last_scan_ts: float = 0
         self._last_scan_count: int = 0
