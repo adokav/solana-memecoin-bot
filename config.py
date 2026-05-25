@@ -223,6 +223,15 @@ class Config:
     # Son N dakikada açılabilir max pozisyon — sistemik exposure kontrolü
     max_positions_per_window_min: int = field(default_factory=lambda: _int("MAX_POSITIONS_PER_WINDOW_MIN", 30))
     max_positions_in_window: int = field(default_factory=lambda: _int("MAX_POSITIONS_IN_WINDOW", 3))
+    # Aynı sector'den max açık pozisyon (other hariç) — narrative bazlı çeşitlendirme
+    max_positions_per_sector: int = field(default_factory=lambda: _int("MAX_POSITIONS_PER_SECTOR", 2))
+
+    # --- Helius WebSocket (smart wallet real-time tetikleme) ---
+    helius_ws_enabled: bool = field(default_factory=lambda: _bool("HELIUS_WS_ENABLED", True))
+
+    # --- Slippage-adaptive sizing ---
+    # Yüksek price impact'li alımlarda otomatik küçük poz (Kelly variance adj)
+    slippage_adaptive_sizing: bool = field(default_factory=lambda: _bool("SLIPPAGE_ADAPTIVE_SIZING", True))
 
     # --- Twitter influencer scanner (Nitter RSS best-effort) ---
     twitter_enabled: bool = field(default_factory=lambda: _bool("TWITTER_ENABLED", False))
