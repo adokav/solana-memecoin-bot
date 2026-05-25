@@ -318,6 +318,44 @@ cüzdan otomatik disable edilir:
 Yeni kalite hesabı her `WALLET_OUTCOMES_INTERVAL` (default 10dk) bir
 çalışır. Disable olduğunda Telegram'a uyarı düşer.
 
+### Helius WebSocket — smart wallet real-time
+
+`HELIUS_WS_ENABLED=true` (default), Helius mainnet WS endpoint'ine bağlanır.
+Her aktif (non-disabled) smart wallet için `logsSubscribe` mention filter
+açılır. Wallet'lardan biri tx yaparsa WS notification gelir, `smart_wallet_loop`
+hemen uyanır (polling timer'ı beklemeden) → tracker.poll_all() çalışır.
+
+- Reaksiyon: 60s polling → sub-saniye
+- Reconnect: exponential backoff (5s → 60s), bağlantı kopuk iken polling
+  normal interval'da devam eder (graceful degradation)
+- Idempotent: poll `last_processed_sig` ile dedup yapar, gereksiz çağrı zarar
+  vermez
+
+### Sector classification + portfolio cap
+
+`sector.py` keyword tabanlı sınıflandırma:
+- 10 sector: ai / dog / cat / frog / political / anime / food / tech / celeb / religion
+- Tüm tokenlar bir sector'e ya da "other"e düşer
+
+`MAX_POSITIONS_PER_SECTOR` (2) — aynı non-"other" sector'den max 2 açık
+pozisyon. Narrative korelasyon koruması: "AI" ısındığında 5 AI tokeni aynı
+anda dump'a uğrarsa portföy çakılmaz.
+
+"other" sector'lar cap'siz (her token'ı klasifiye edemiyoruz).
+
+### Slippage-adaptive sizing
+
+`SLIPPAGE_ADAPTIVE_SIZING=true` (default), honeypot sim'den gelen
+`price_impact_pct`'a göre size çarpanı:
+- impact ≤ 1% → 1.0× (full size)
+- 1% < impact ≤ 3% → 0.8×
+- 3% < impact ≤ 5% → 0.6×
+- impact > 5% → 0.4×
+
+Kelly variance adjustment — yüksek slippage = yüksek varyans → küçük poz.
+Mevcut sizing pipeline'ının (bandit/adaptive + wallet profile)
+**üzerine** çarpılır.
+
 ### Fast-poll loop
 
 `FAST_POLL_ENABLED=true` (default), her `FAST_POLL_INTERVAL` (15s) bir

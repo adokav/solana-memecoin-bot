@@ -22,6 +22,7 @@ from config import config
 from dexscreener import DexScreener
 from rugcheck import SafetyReport
 from screener import Candidate
+from sector import classify as sector_classify
 from smart_wallets import SmartWalletStore
 from storage import Position, PyramidAdd, TpHit
 
@@ -97,6 +98,7 @@ class PaperStore:
             entry_top10_pct=safety.top10_pct,
             creator=safety.creator,
             entry_price_impact_pct=c.score_breakdown.get("_entry_price_impact_pct"),
+            sector=sector_classify(c.base_symbol),
         )
         self.positions.append(pos)
         self.save()

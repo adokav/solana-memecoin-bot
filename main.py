@@ -25,6 +25,8 @@ from config import config
 from dashboard import start_dashboard, stop_dashboard
 from dexscreener import DexScreener
 from helius import Helius
+from helius_ws import HeliusWs
+from sector import classify as sector_classify
 from jupiter import Jupiter, LAMPORTS_PER_SOL
 from lunarcrush import LunarCrush
 from macro import MacroCollector, append_snapshot, format_snapshot, latest_snapshot
@@ -91,6 +93,20 @@ logging.basicConfig(
 log = logging.getLogger("main")
 
 
+def _slippage_factor(impact_pct: float) -> float:
+    """Price impact'e göre size multiplier (Kelly variance adjustment).
+
+    Yüksek impact = derin olmayan likidite + büyük slippage riski → küçük poz.
+    """
+    if impact_pct <= 1.0:
+        return 1.0
+    if impact_pct <= 3.0:
+        return 0.8
+    if impact_pct <= 5.0:
+        return 0.6
+    return 0.4
+
+
 class Bot:
     def __init__(self) -> None:
         kp = load_keypair()
@@ -132,6 +148,17 @@ class Bot:
             if self.smart_store is not None
             and self.helius is not None
             and self.outcome_store is not None
+            else None
+        )
+        # WS real-time wakeup için event
+        self._smart_wakeup = asyncio.Event()
+        self.helius_ws: HeliusWs | None = (
+            HeliusWs(self.smart_store, self._smart_wakeup)
+            if (
+                self.smart_store is not None
+                and config.helius_api_key
+                and config.helius_ws_enabled
+            )
             else None
         )
         # Wallet auto-discovery: kazanan sinyallerin ilk alıcılarından öğrenir
@@ -253,6 +280,21 @@ class Bot:
             )
             return
 
+        # Correlation check 3: sector — aynı narrative'den çok pozisyon olmasın
+        candidate_sector = sector_classify(c.base_symbol)
+        if candidate_sector != "other" and config.max_positions_per_sector > 0:
+            same_sector = sum(
+                1 for p in open_positions if p.sector == candidate_sector
+            )
+            if same_sector >= config.max_positions_per_sector:
+                await self.tg.info(
+                    f"⛔ <b>${c.base_symbol}</b> atlandı — sector "
+                    f"<code>{candidate_sector}</code> doygun "
+                    f"(<code>{same_sector}/{config.max_positions_per_sector}</code> açık). "
+                    f"Narrative korelasyon koruması."
+                )
+                return
+
         # Sizing: bandit önce, kapalıysa adaptive_sizing, o da kapalıysa flat
         paper_positions = self.paper_store.positions if self.paper_store else None
         chosen_multiplier: float | None = None
@@ -272,6 +314,18 @@ class Bot:
             chosen_multiplier = (
                 buy_amount / config.buy_amount_sol if config.buy_amount_sol > 0 else 1.0
             )
+
+        # Slippage-adaptive sizing: yüksek price impact'te küçült (Kelly variance adj)
+        if config.slippage_adaptive_sizing:
+            impact_pct = float(
+                c.score_breakdown.get("_entry_price_impact_pct") or 0
+            )
+            slip_factor = _slippage_factor(impact_pct)
+            if slip_factor < 1.0:
+                buy_amount = buy_amount * slip_factor
+                size_note = (
+                    f"{size_note} | impact {impact_pct:.1f}% → ×{slip_factor:.1f}"
+                )
 
         if buy_amount <= 0:
             await self.tg.info(
@@ -374,6 +428,7 @@ class Bot:
             entry_holders=entry_holders,
             creator=safety.creator,
             entry_price_impact_pct=c.score_breakdown.get("_entry_price_impact_pct"),
+            sector=sector_classify(c.base_symbol),
         )
         self.store.add(pos)
 
@@ -496,6 +551,8 @@ class Bot:
             f"• Graduation = otomatik full exit\n\n"
             f"<a href=\"https://solscan.io/tx/{sig}\">solscan</a>"
         )
+
+    # ---------- Helpers ----------
 
     @staticmethod
     def _pump_price_from_coin(coin_data: dict) -> float:
@@ -1282,7 +1339,18 @@ class Bot:
                     await self.smart_tracker.poll_all()
                 except Exception:
                     log.exception("smart wallet loop error")
-            await asyncio.sleep(config.smart_wallets_poll_interval)
+            # WS wakeup ya da timer — hangisi önce
+            try:
+                await asyncio.wait_for(
+                    self._smart_wakeup.wait(),
+                    timeout=config.smart_wallets_poll_interval,
+                )
+                # Wake-up geldi → küçük debounce (eş zamanlı birden fazla
+                # tx geldiğinde tek poll'da işlensin)
+                await asyncio.sleep(2)
+            except asyncio.TimeoutError:
+                pass
+            self._smart_wakeup.clear()
 
     # ---------- Loop: pump.fun pre-graduation alerts ----------
 
@@ -1529,6 +1597,8 @@ class Bot:
             tasks.append(asyncio.create_task(self.autotune_loop(), name="autotune"))
         if config.fast_poll_enabled:
             tasks.append(asyncio.create_task(self.fast_poll_loop(), name="fast_poll"))
+        if self.helius_ws is not None:
+            tasks.append(asyncio.create_task(self.helius_ws.run(), name="helius_ws"))
 
         await self._stop.wait()
         log.info("shutting down...")
@@ -1564,6 +1634,8 @@ class Bot:
             await self.twitter_scanner.close()
         if self.tg_channels_scanner is not None:
             await self.tg_channels_scanner.close()
+        if self.helius_ws is not None:
+            await self.helius_ws.stop()
 
 
 def main() -> None:

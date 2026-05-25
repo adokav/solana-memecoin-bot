@@ -76,6 +76,8 @@ class Position:
     creator: Optional[str] = None
     # Honeypot sim'den gelen price impact tahmini — ML feature
     entry_price_impact_pct: Optional[float] = None
+    # Sector etiketi (keyword tabanlı) — portföy çeşitlendirme için
+    sector: Optional[str] = None
 
 
 @dataclass
