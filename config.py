@@ -213,6 +213,17 @@ class Config:
     # --- Pyramid bandit (size_ratio için Thompson sampling) ---
     pyramid_bandit_enabled: bool = field(default_factory=lambda: _bool("PYRAMID_BANDIT_ENABLED", False))
 
+    # --- Fast-poll loop (time-sensitive source önceliklendirme) ---
+    fast_poll_enabled: bool = field(default_factory=lambda: _bool("FAST_POLL_ENABLED", True))
+    fast_poll_interval: int = field(default_factory=lambda: _int("FAST_POLL_INTERVAL", 15))
+
+    # --- Position correlation manager ---
+    # Aynı creator'a sahip max açık pozisyon — 1 = strict (her creator'dan tek)
+    max_positions_per_creator: int = field(default_factory=lambda: _int("MAX_POSITIONS_PER_CREATOR", 1))
+    # Son N dakikada açılabilir max pozisyon — sistemik exposure kontrolü
+    max_positions_per_window_min: int = field(default_factory=lambda: _int("MAX_POSITIONS_PER_WINDOW_MIN", 30))
+    max_positions_in_window: int = field(default_factory=lambda: _int("MAX_POSITIONS_IN_WINDOW", 3))
+
     # --- Twitter influencer scanner (Nitter RSS best-effort) ---
     twitter_enabled: bool = field(default_factory=lambda: _bool("TWITTER_ENABLED", False))
     # Takip edilecek X kullanıcıları, virgülle ayrılmış (@ olmadan)

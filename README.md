@@ -318,6 +318,43 @@ cüzdan otomatik disable edilir:
 Yeni kalite hesabı her `WALLET_OUTCOMES_INTERVAL` (default 10dk) bir
 çalışır. Disable olduğunda Telegram'a uyarı düşer.
 
+### Fast-poll loop
+
+`FAST_POLL_ENABLED=true` (default), her `FAST_POLL_INTERVAL` (15s) bir
+pump.fun graduate + DS latest_boosted endpoint'lerini pollar. Yeni mint
+görürse screener'ın **priority queue**'sine ekler — bir sonraki scan
+cycle'da bu mint'ler ÖNCE işlenir.
+
+Sonuç: time-sensitive token'ları (graduate olur olmaz, boost atılır
+atılmaz) ortalama 7-8 saniyede yakalıyoruz, full scan cycle'ı (60s)
+beklemeden.
+
+Heavy işler (pairs_for_token, RugCheck, honeypot) hâlâ normal scan
+cycle'da çalışır — DS rate limit korunur. Sadece listing endpoint'leri
+hızlı pollanır.
+
+### Position correlation manager
+
+Aynı creator'dan veya kısa süre içinde çok fazla pozisyon açılmasına
+karşı koruma:
+- `MAX_POSITIONS_PER_CREATOR` (1) — bir creator'dan eş zamanlı max
+  açık pozisyon. Strict: tek (creator'lar genellikle aynı anda promote
+  ettikleri tokenları "pump and dump" yapar)
+- `MAX_POSITIONS_IN_WINDOW` (3) + `MAX_POSITIONS_PER_WINDOW_MIN` (30) —
+  son 30dk içinde max 3 yeni pozisyon. Sistemik exposure kontrolü.
+
+İki check `on_buy`'da `MAX_OPEN_POSITIONS`'tan sonra çalışır.
+
+### Slippage-aware ML feature
+
+ML feature vektörüne `entry_price_impact_pct` eklendi (FEATURE_VERSION=2).
+Honeypot sim'in döndürdüğü Jupiter price impact tahmini → ML modeli
+"likidite kalitesi" sinyali olarak öğrenir.
+
+**Önemli:** Eski ML modeli (15 feature) artık uyumsuz. `/train` ile
+yeniden eğit. Bot eski modelle çalıştığını fark ederse `ml_predicted`
+score componenti otomatik 0 döner (nötr) — bot crash etmez.
+
 ### MEV / sandwich detection
 
 `MEV_MONITOR_ENABLED=true` (default). Her başarılı alımdan sonra:

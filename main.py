@@ -222,6 +222,37 @@ class Bot:
             )
             return
 
+        # Correlation check 1: aynı creator'dan açık pozisyon
+        if safety.creator and config.max_positions_per_creator >= 0:
+            same_creator = sum(
+                1 for p in open_positions if p.creator == safety.creator
+            )
+            if same_creator >= config.max_positions_per_creator:
+                await self.tg.info(
+                    f"⛔ <b>${c.base_symbol}</b> atlandı — aynı creator zaten "
+                    f"<code>{same_creator}</code> açık pozisyon "
+                    f"(<code>{safety.creator[:6]}..{safety.creator[-4:]}</code>). "
+                    f"Correlation cap."
+                )
+                return
+
+        # Correlation check 2: son N dakikada çok fazla yeni pozisyon
+        now = time.time()
+        window_start = now - config.max_positions_per_window_min * 60
+        recent_opens = sum(
+            1 for p in self.store.positions
+            if p.opened_at >= window_start
+        )
+        if recent_opens >= config.max_positions_in_window:
+            await self.tg.info(
+                f"⛔ <b>${c.base_symbol}</b> atlandı — son "
+                f"<code>{config.max_positions_per_window_min}dk</code> içinde "
+                f"<code>{recent_opens}</code> pozisyon açıldı "
+                f"(limit <code>{config.max_positions_in_window}</code>). "
+                f"Sistemik exposure koruması."
+            )
+            return
+
         # Sizing: bandit önce, kapalıysa adaptive_sizing, o da kapalıysa flat
         paper_positions = self.paper_store.positions if self.paper_store else None
         chosen_multiplier: float | None = None
@@ -341,6 +372,8 @@ class Bot:
             sizing_multiplier=chosen_multiplier,
             wallet_pubkey=chosen_wallet.pubkey,
             entry_holders=entry_holders,
+            creator=safety.creator,
+            entry_price_impact_pct=c.score_breakdown.get("_entry_price_impact_pct"),
         )
         self.store.add(pos)
 
@@ -683,6 +716,60 @@ class Bot:
         if pnl_pct <= -config.stop_loss:
             await self._pump_close_all(pos, price, f"SL {pnl_pct:.1f}%")
             return
+
+    # ---------- Loop: fast-poll (time-sensitive sources önceliklendirme) ----------
+
+    async def fast_poll_loop(self) -> None:
+        """pump.fun graduate + DS latest_boosted'u yüksek frekansla pollar,
+        yeni mint görürse screener priority queue'sine ekler. Tam pipeline
+        sonraki normal scan cycle'da çalışır.
+        """
+        await asyncio.sleep(20)
+        seen_recent: set[str] = set()
+        while not self._stop.is_set():
+            if not config.fast_poll_enabled:
+                await asyncio.sleep(config.fast_poll_interval)
+                continue
+            try:
+                new_mints: list[str] = []
+                # pump.fun graduate (time-sensitive)
+                if self.pf is not None and config.pumpfun_enabled:
+                    try:
+                        mints = await self.pf.recently_graduated()
+                        for m in mints:
+                            if m and m not in seen_recent:
+                                seen_recent.add(m)
+                                new_mints.append(m)
+                    except Exception:
+                        log.exception("fast_poll pump.fun error")
+                # DS latest_boosted (yeni boost'lar genelde momentum sinyali)
+                try:
+                    items = await self.ds.latest_boosted()
+                    for it in items:
+                        if it.get("chainId") != "solana":
+                            continue
+                        addr = it.get("tokenAddress")
+                        if addr and addr not in seen_recent:
+                            seen_recent.add(addr)
+                            new_mints.append(addr)
+                except Exception:
+                    log.exception("fast_poll DS boosted error")
+
+                # seen_recent şişmesin — sliding cap
+                if len(seen_recent) > 500:
+                    # Set'i yarıya kırp
+                    seen_recent = set(list(seen_recent)[-250:])
+
+                if new_mints:
+                    added = self.screener.enqueue_priority(new_mints)
+                    if added > 0:
+                        log.info(
+                            "fast_poll: %d new mints queued for priority scan",
+                            added,
+                        )
+            except Exception:
+                log.exception("fast_poll loop error")
+            await asyncio.sleep(config.fast_poll_interval)
 
     # ---------- Loop: Twitter influencer polling ----------
 
@@ -1105,6 +1192,8 @@ class Bot:
                         "PASS %s score=%.1f+%.1f loss=%.1f%% impact=%.2f%%",
                         c.base_symbol, c.score, safety.score, loss_pct, impact,
                     )
+                    # ML feature: price impact'i Candidate'e ek alan olarak koy
+                    c.score_breakdown["_entry_price_impact_pct"] = round(impact, 3)
 
                     await self.tg.alert(c, safety)
                     self.screener.mark_alerted(c.base_token, c.score + safety.score)
@@ -1438,6 +1527,8 @@ class Bot:
             tasks.append(asyncio.create_task(self.tg_channels_loop(), name="tg_channels"))
         if config.autotune_enabled:
             tasks.append(asyncio.create_task(self.autotune_loop(), name="autotune"))
+        if config.fast_poll_enabled:
+            tasks.append(asyncio.create_task(self.fast_poll_loop(), name="fast_poll"))
 
         await self._stop.wait()
         log.info("shutting down...")

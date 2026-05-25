@@ -390,6 +390,17 @@ class Screener:
         self._liq_history: dict[str, list[tuple[float, float]]] = {}
         # {base_token: [(ts, buy_ratio), ...]}  buy ratio velocity için
         self._buy_ratio_history: dict[str, list[tuple[float, float]]] = {}
+        # Fast-poll loop'tan gelen, sıradaki scan'de ÖNCELİKLE işlenecek mint'ler
+        # (pump.fun graduate, DS latest_boosted, smart wallet inject vb. — time-sensitive)
+        self._priority_queue: set[str] = set()
+
+    def enqueue_priority(self, mints: list[str]) -> int:
+        """Fast-poll'dan gelen mint'leri öncelikli işleme kuyruğuna ekle."""
+        before = len(self._priority_queue)
+        for m in mints:
+            if m:
+                self._priority_queue.add(m)
+        return len(self._priority_queue) - before
 
     def _record_liquidity(self, token: str, liq: float) -> None:
         now = time.time()
@@ -506,6 +517,20 @@ class Screener:
         sol_tokens: list[str] = []
         on_cd = 0
 
+        # Priority queue (fast-poll'dan gelen time-sensitive mint'ler) önce
+        priority_count = 0
+        if self._priority_queue:
+            for addr in list(self._priority_queue):
+                if addr in seen_tokens:
+                    continue
+                seen_tokens.add(addr)
+                if self._on_cooldown(addr):
+                    on_cd += 1
+                else:
+                    sol_tokens.append(addr)
+                    priority_count += 1
+            self._priority_queue.clear()
+
         src_profiles = await self.ds.latest_profiles()
         src_latest = await self.ds.latest_boosted()
         src_top = await self.ds.top_boosted()
@@ -550,8 +575,8 @@ class Screener:
                     sol_tokens.append(addr)
 
         log.info(
-            "scan src: profiles=%d boosted=%d top=%d pump=%d smart=%d | sol unique=%d | cooldown=%d | to_fetch=%d",
-            len(src_profiles), len(src_latest), len(src_top),
+            "scan src: priority=%d profiles=%d boosted=%d top=%d pump=%d smart=%d | sol unique=%d | cooldown=%d | to_fetch=%d",
+            priority_count, len(src_profiles), len(src_latest), len(src_top),
             len(src_pump), len(src_smart),
             len(seen_tokens), on_cd, min(len(sol_tokens), 80),
         )
@@ -722,6 +747,9 @@ class Screener:
                     c.liquidity_usd,
                     0.0,  # entry_top10_pct entry'de henüz bilinmiyor
                     hour_utc,
+                    entry_price_impact_pct=float(
+                        c.score_breakdown.get("_entry_price_impact_pct") or 0
+                    ),
                 )
                 try:
                     win_prob = predict_win_probability(self.ml_bundle, features)

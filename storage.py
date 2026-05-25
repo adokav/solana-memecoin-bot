@@ -72,6 +72,10 @@ class Position:
     # Entry anındaki top N holder snapshot — insider exit detection için
     # [{address, amount, ui_amount}, ...]
     entry_holders: list[dict] = field(default_factory=list)
+    # Token creator adresi — correlation manager için
+    creator: Optional[str] = None
+    # Honeypot sim'den gelen price impact tahmini — ML feature
+    entry_price_impact_pct: Optional[float] = None
 
 
 @dataclass

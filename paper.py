@@ -95,6 +95,8 @@ class PaperStore:
             original_entry_price_usd=entry_price,
             entry_liquidity_usd=c.liquidity_usd,
             entry_top10_pct=safety.top10_pct,
+            creator=safety.creator,
+            entry_price_impact_pct=c.score_breakdown.get("_entry_price_impact_pct"),
         )
         self.positions.append(pos)
         self.save()

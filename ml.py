@@ -33,7 +33,9 @@ log = logging.getLogger(__name__)
 
 MODEL_PATH = config.data_dir / "ml_model.pkl"
 
-# Feature sırası — train ve inference arasında stabil olmalı
+# Feature sırası — train ve inference arasında stabil olmalı.
+# YENİ FEATURE EKLENDİĞİNDE FEATURE_VERSION'u arttır + eski modeli invalide et.
+FEATURE_VERSION = 2
 FEATURE_ORDER = [
     "momentum",
     "vol_liq",
@@ -50,6 +52,8 @@ FEATURE_ORDER = [
     "entry_liquidity_log",
     "entry_top10_pct",
     "hour_utc",
+    # v2 yeni feature'ları:
+    "entry_price_impact_pct",  # honeypot sim'den gelen, alımın fiyatı ne kadar bozar
 ]
 
 
@@ -102,6 +106,7 @@ def extract_features_from_position(pos: Position) -> list[float]:
         _safe_log(pos.entry_liquidity_usd or 0),
         float(pos.entry_top10_pct or 0),
         hour,
+        float(pos.entry_price_impact_pct or 0),
     ]
 
 
@@ -115,9 +120,12 @@ def _get_bd(pos: Position, key: str) -> float:
     return 0.0
 
 
-def extract_features_from_dict(score_breakdown: dict, profile: str,
-                                entry_liquidity: float, entry_top10: float,
-                                hour_utc: int) -> list[float]:
+def extract_features_from_dict(
+    score_breakdown: dict, profile: str,
+    entry_liquidity: float, entry_top10: float,
+    hour_utc: int,
+    entry_price_impact_pct: float = 0.0,
+) -> list[float]:
     """Henüz Position'a dönüşmemiş candidate için feature vektörü."""
     is_early, is_pump = _profile_encode(profile)
     return [
@@ -136,6 +144,7 @@ def extract_features_from_dict(score_breakdown: dict, profile: str,
         _safe_log(entry_liquidity),
         float(entry_top10),
         hour_utc,
+        float(entry_price_impact_pct or 0),
     ]
 
 
@@ -250,11 +259,25 @@ def load_model() -> ModelBundle | None:
 
 
 def predict_win_probability(bundle: ModelBundle, features: list[float]) -> float:
-    """Verilen feature vektörü için kazanma olasılığı (0-1)."""
+    """Verilen feature vektörü için kazanma olasılığı (0-1).
+
+    Feature count mismatch (eski model, yeni feature eklendi) → nötr 0.5 döner.
+    /train ile yeniden eğitilmeli.
+    """
+    expected = getattr(bundle.model, "n_features_in_", None)
+    if expected is not None and expected != len(features):
+        log.warning(
+            "ml feature mismatch: model expects %d, got %d — /train ile yeniden eğit",
+            expected, len(features),
+        )
+        return 0.5
     X = np.array([features], dtype=float)
-    X_s = bundle.scaler.transform(X)
-    proba = bundle.model.predict_proba(X_s)[0]
-    # proba[1] = class 1 (win) olasılığı
+    try:
+        X_s = bundle.scaler.transform(X)
+        proba = bundle.model.predict_proba(X_s)[0]
+    except Exception:
+        log.exception("ml predict failed (scaler/model mismatch)")
+        return 0.5
     if len(proba) >= 2:
         return float(proba[1])
     return 0.5
