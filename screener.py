@@ -393,6 +393,8 @@ class Screener:
         # Fast-poll loop'tan gelen, sıradaki scan'de ÖNCELİKLE işlenecek mint'ler
         # (pump.fun graduate, DS latest_boosted, smart wallet inject vb. — time-sensitive)
         self._priority_queue: set[str] = set()
+        # Son N tarama özetleri — /scan_stats için visibility
+        self._scan_history: list[dict] = []
 
     def enqueue_priority(self, mints: list[str]) -> int:
         """Fast-poll'dan gelen mint'leri öncelikli işleme kuyruğuna ekle."""
@@ -762,4 +764,53 @@ class Screener:
                 c.score = round(sum(c.score_breakdown.values()), 1)
             candidates.sort(key=lambda x: x.score, reverse=True)
 
+        # Scan history kaydı — /scan_stats için
+        self._scan_history.append({
+            "ts": time.time(),
+            "src_profiles": len(src_profiles),
+            "src_boosted": len(src_latest),
+            "src_top": len(src_top),
+            "src_pump": len(src_pump),
+            "src_smart": len(src_smart),
+            "src_priority": priority_count,
+            "unique": len(seen_tokens),
+            "cooldown": on_cd,
+            "to_fetch": min(len(sol_tokens), 80),
+            "cuts": dict(cuts),
+            "passed": len(candidates),
+        })
+        # Son 10'u tut
+        if len(self._scan_history) > 10:
+            self._scan_history = self._scan_history[-10:]
+
         return candidates
+
+    def format_scan_stats(self) -> str:
+        """Son 5 taramanın source/cut/pass breakdown'unu döner."""
+        if not self._scan_history:
+            return "🔍 <b>Tarama istatistikleri</b>\nHenüz tarama yok."
+        recent = list(reversed(self._scan_history[-5:]))
+        lines = [f"🔍 <b>Son {len(recent)} tarama</b>"]
+        for s in recent:
+            age_min = (time.time() - s["ts"]) / 60
+            cuts = s["cuts"]
+            lines.append(
+                f"\n<i>{age_min:.0f}dk önce</i>\n"
+                f"  Kaynak: profiles=<code>{s['src_profiles']}</code> "
+                f"boost=<code>{s['src_boosted']}</code> "
+                f"top=<code>{s['src_top']}</code> "
+                f"pump=<code>{s['src_pump']}</code> "
+                f"smart=<code>{s['src_smart']}</code> "
+                f"priority=<code>{s['src_priority']}</code>\n"
+                f"  Unique: <code>{s['unique']}</code>  "
+                f"cooldown: <code>{s['cooldown']}</code>  "
+                f"fetched: <code>{s['to_fetch']}</code>\n"
+                f"  Cuts: no_pairs=<code>{cuts.get('no_pairs', 0)}</code> "
+                f"parse=<code>{cuts.get('parse_fail', 0)}</code> "
+                f"sanity=<code>{cuts.get('sanity', 0)}</code> "
+                f"liq_dd=<code>{cuts.get('liq_drawdown', 0)}</code> "
+                f"profile=<code>{cuts.get('profile', 0)}</code> "
+                f"low_score=<code>{cuts.get('low_score', 0)}</code>\n"
+                f"  → <b>passed: {s['passed']}</b>"
+            )
+        return "\n".join(lines)

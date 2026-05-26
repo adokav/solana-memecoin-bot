@@ -1114,6 +1114,9 @@ class Bot:
             )
         return format_telegram_status(self.tg_channels_scanner.store)
 
+    async def scan_stats_text(self) -> str:
+        return self.screener.format_scan_stats()
+
     async def tune_text(self) -> str:
         positions = list(self.store.positions)
         if self.paper_store is not None:
@@ -1545,6 +1548,7 @@ class Bot:
         self.tg.set_twitter_callback(self.twitter_text)
         self.tg.set_tune_callback(self.tune_text)
         self.tg.set_tgchannels_callback(self.tgchannels_text)
+        self.tg.set_scan_stats_callback(self.scan_stats_text)
 
         await self.tg.start()
         try:

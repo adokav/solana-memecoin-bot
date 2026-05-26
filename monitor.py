@@ -22,6 +22,24 @@ from telegram_handler import TelegramHub
 log = logging.getLogger(__name__)
 
 
+def _compute_tp1_sell_pct(trigger_pct: float) -> float:
+    """TP1 anapara kurtarma sell %'i hesaplar.
+
+    DYNAMIC_PRINCIPAL_RECOVERY açıksa:
+      sell_pct = 1 / (1 + trigger/100) × 1.05  (5% slippage buffer)
+      → matematiksel olarak orijinal SOL + ~5% kasaya döner
+    Kapalıysa config.tp1_sell (static) kullanılır.
+
+    Cap edilir: max %95 (her zaman moon bag bırak).
+    """
+    if not config.tp1_dynamic_principal_recovery:
+        return config.tp1_sell
+    if trigger_pct <= 0:
+        return config.tp1_sell
+    raw = 100.0 / (1.0 + trigger_pct / 100.0) * 1.05
+    return max(10.0, min(95.0, raw))
+
+
 class Monitor:
     def __init__(
         self,
@@ -441,9 +459,10 @@ class Monitor:
             await self._partial_sell(pos, 2, config.tp2_trigger, config.tp2_sell, price)
             return
 
-        # --- TP1 ---
+        # --- TP1: anapara kurtarma (dinamik sell %) ---
         if 1 not in hit_levels and pnl_pct >= config.tp1_trigger:
-            await self._partial_sell(pos, 1, config.tp1_trigger, config.tp1_sell, price)
+            tp1_sell_pct = _compute_tp1_sell_pct(config.tp1_trigger)
+            await self._partial_sell(pos, 1, config.tp1_trigger, tp1_sell_pct, price)
             return
 
         # --- Trailing stop (TP1 sonrası aktif; smart exit signal'i daraltabilir) ---
