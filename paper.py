@@ -286,7 +286,9 @@ class PaperMonitor:
             self._partial_sell(pos, 2, config.tp2_trigger, config.tp2_sell, price)
             return
         if 1 not in hit and pnl_pct >= config.tp1_trigger:
-            self._partial_sell(pos, 1, config.tp1_trigger, config.tp1_sell, price)
+            from monitor import _compute_tp1_sell_pct
+            tp1_sell_pct = _compute_tp1_sell_pct(config.tp1_trigger)
+            self._partial_sell(pos, 1, config.tp1_trigger, tp1_sell_pct, price)
             return
         trail_pct = pos.trailing_stop_override_pct or config.trailing_stop
         if pos.tp_hits and drawdown >= trail_pct:

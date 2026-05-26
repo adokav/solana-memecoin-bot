@@ -87,12 +87,22 @@ class Config:
     # 100k lamports ~ $0.02; memecoin yarışında 100k-1M arası tipiktir
     jito_tip_lamports: int = field(default_factory=lambda: _int("JITO_TIP_LAMPORTS", 100_000))
 
-    # --- Kademeli çıkış ---
-    tp1_trigger: float = field(default_factory=lambda: _float("TP1_TRIGGER_PCT", 30))
-    tp1_sell: float = field(default_factory=lambda: _float("TP1_SELL_PCT", 30))
-    tp2_trigger: float = field(default_factory=lambda: _float("TP2_TRIGGER_PCT", 80))
-    tp2_sell: float = field(default_factory=lambda: _float("TP2_SELL_PCT", 40))
-    tp3_trigger: float = field(default_factory=lambda: _float("TP3_TRIGGER_PCT", 200))
+    # --- Kademeli çıkış (matematik-olasılık: principal recovery + moon bag) ---
+    # TP1: anapara kurtarma noktası. Default +%50.
+    tp1_trigger: float = field(default_factory=lambda: _float("TP1_TRIGGER_PCT", 50))
+    # tp1_sell static fallback — DYNAMIC_PRINCIPAL_RECOVERY açıksa override
+    tp1_sell: float = field(default_factory=lambda: _float("TP1_SELL_PCT", 70))
+    # Dinamik anapara kurtarma: sell_pct = 1/(1 + trigger/100) × 1.05 (5% buffer)
+    # Bu sayede TP1'de kasaya orijinal SOL + küçük tampon geri döner.
+    # TP1_TRIGGER ne olursa olsun matematiksel olarak anapara kurtarılır.
+    tp1_dynamic_principal_recovery: bool = field(
+        default_factory=lambda: _bool("TP1_DYNAMIC_PRINCIPAL_RECOVERY", True),
+    )
+    # TP2: büyük profit lock
+    tp2_trigger: float = field(default_factory=lambda: _float("TP2_TRIGGER_PCT", 200))
+    tp2_sell: float = field(default_factory=lambda: _float("TP2_SELL_PCT", 50))
+    # TP3: moon bag küçültme
+    tp3_trigger: float = field(default_factory=lambda: _float("TP3_TRIGGER_PCT", 500))
     tp3_sell: float = field(default_factory=lambda: _float("TP3_SELL_PCT", 50))
     stop_loss: float = field(default_factory=lambda: _float("STOP_LOSS_PCT", 35))
     trailing_stop: float = field(default_factory=lambda: _float("TRAILING_STOP_PCT", 25))
@@ -169,12 +179,13 @@ class Config:
     max_creator_tokens: int = field(default_factory=lambda: _int("MAX_CREATOR_TOKENS", 15))
 
     # --- Otomatik alım & devre kesici ---
-    # Default kapalı — paper data ile edge doğrulandıktan sonra aç
-    auto_trade_enabled: bool = field(default_factory=lambda: _bool("AUTO_TRADE_ENABLED", False))
-    # Sadece çok yüksek güven sinyallerde tetiklen
-    auto_trade_min_score: float = field(default_factory=lambda: _float("AUTO_TRADE_MIN_SCORE", 85))
-    auto_trade_min_safety_score: float = field(default_factory=lambda: _float("AUTO_TRADE_MIN_SAFETY_SCORE", 8))
-    auto_trade_max_price_impact: float = field(default_factory=lambda: _float("AUTO_TRADE_MAX_PRICE_IMPACT", 2.0))
+    # Felsefe: filtreleri (mint/freeze revoke + honeypot + canlı aktivite)
+    # geçen aday zaten "al" demektir. Skor sıralama için; gate değil.
+    auto_trade_enabled: bool = field(default_factory=lambda: _bool("AUTO_TRADE_ENABLED", True))
+    # Skor 0 = pratikte gate yok (alert eşiği zaten filtre işlevi görür)
+    auto_trade_min_score: float = field(default_factory=lambda: _float("AUTO_TRADE_MIN_SCORE", 0))
+    auto_trade_min_safety_score: float = field(default_factory=lambda: _float("AUTO_TRADE_MIN_SAFETY_SCORE", 0))
+    auto_trade_max_price_impact: float = field(default_factory=lambda: _float("AUTO_TRADE_MAX_PRICE_IMPACT", 5.0))
 
     # Günlük kayıp tavanı: aşılırsa gün sonuna kadar yeni alım yok
     daily_loss_stop_sol: float = field(default_factory=lambda: _float("DAILY_LOSS_STOP_SOL", 0.05))
@@ -222,13 +233,13 @@ class Config:
     fast_poll_interval: int = field(default_factory=lambda: _int("FAST_POLL_INTERVAL", 15))
 
     # --- Position correlation manager ---
-    # Aynı creator'a sahip max açık pozisyon — 1 = strict (her creator'dan tek)
-    max_positions_per_creator: int = field(default_factory=lambda: _int("MAX_POSITIONS_PER_CREATOR", 1))
-    # Son N dakikada açılabilir max pozisyon — sistemik exposure kontrolü
+    # Felsefe: her coin'i tek başına değerlendir. Gerçek koruma
+    # MAX_OPEN_POSITIONS + MAX_TOTAL_EXPOSURE_SOL + DAILY_LOSS_STOP.
+    # Correlation cap'leri pratikte off (yüksek limit). Aktif etmek istersen düşür.
+    max_positions_per_creator: int = field(default_factory=lambda: _int("MAX_POSITIONS_PER_CREATOR", 10))
     max_positions_per_window_min: int = field(default_factory=lambda: _int("MAX_POSITIONS_PER_WINDOW_MIN", 30))
-    max_positions_in_window: int = field(default_factory=lambda: _int("MAX_POSITIONS_IN_WINDOW", 3))
-    # Aynı sector'den max açık pozisyon (other hariç) — narrative bazlı çeşitlendirme
-    max_positions_per_sector: int = field(default_factory=lambda: _int("MAX_POSITIONS_PER_SECTOR", 2))
+    max_positions_in_window: int = field(default_factory=lambda: _int("MAX_POSITIONS_IN_WINDOW", 10))
+    max_positions_per_sector: int = field(default_factory=lambda: _int("MAX_POSITIONS_PER_SECTOR", 10))
 
     # --- Helius WebSocket (smart wallet real-time tetikleme) ---
     helius_ws_enabled: bool = field(default_factory=lambda: _bool("HELIUS_WS_ENABLED", True))
@@ -264,12 +275,13 @@ class Config:
     # Token auth — URL'de ?token=XXX olarak gelmeli
     dashboard_token: str = field(default_factory=lambda: _str("DASHBOARD_TOKEN", ""))
 
-    # --- Pyramid / DCA (TP1 sonrası kazanan trende ekleme) ---
-    # Default kapalı — riskli, paper'da kazanan strateji görüldükten sonra aç
-    pyramid_enabled: bool = field(default_factory=lambda: _bool("PYRAMID_ENABLED", False))
+    # --- Pyramid / DCA (anti-martingale: kazanan trende ekleme) ---
+    # Strateji çekirdeği: TP1 sonrası (anapara kasada) yeni ATH'lere pyramid
+    pyramid_enabled: bool = field(default_factory=lambda: _bool("PYRAMID_ENABLED", True))
     pyramid_max_adds: int = field(default_factory=lambda: _int("PYRAMID_MAX_ADDS", 2))
     # TP1 trigger'ından sonra her +N% adımında bir add tetiklenir
-    pyramid_trigger_step_pct: float = field(default_factory=lambda: _float("PYRAMID_TRIGGER_STEP_PCT", 30))
+    # TP1 +50, step 50 → addler +100, +150 noktalarında
+    pyramid_trigger_step_pct: float = field(default_factory=lambda: _float("PYRAMID_TRIGGER_STEP_PCT", 50))
     # Her add miktarı = BUY_AMOUNT_SOL × bu oran
     pyramid_size_ratio: float = field(default_factory=lambda: _float("PYRAMID_SIZE_RATIO", 0.5))
 
@@ -330,8 +342,9 @@ class Config:
     # Bir tokenı sadece smart wallet alımlarından dolayı scan'e enjekte etmek için min eşik
     smart_min_buys_for_inject: int = field(default_factory=lambda: _int("SMART_MIN_BUYS_FOR_INJECT", 2))
 
-    # Smart wallet exit signal: aldığımız tokeni smart wallet'lar dump'ladığında
-    smart_exit_signals_enabled: bool = field(default_factory=lambda: _bool("SMART_EXIT_SIGNALS_ENABLED", True))
+    # Smart wallet exit signal — smart wallet listesi popüle ise faydalı.
+    # Liste boşsa zaten tetik yok, ama config gürültüsünü azaltmak için kapalı.
+    smart_exit_signals_enabled: bool = field(default_factory=lambda: _bool("SMART_EXIT_SIGNALS_ENABLED", False))
     smart_exit_window_min: int = field(default_factory=lambda: _int("SMART_EXIT_WINDOW_MIN", 30))
     # Wallet'in alımını görmediysek minimum sell SOL eşiği — gürültü filtresi
     smart_exit_min_sol: float = field(default_factory=lambda: _float("SMART_EXIT_MIN_SOL", 0.5))
@@ -342,8 +355,9 @@ class Config:
     hold_safety_check_interval: int = field(default_factory=lambda: _int("HOLD_SAFETY_CHECK_INTERVAL", 300))
     # Likidite girişten % bu kadar düşerse rug in progress → kapat
     hold_liq_drain_pct: float = field(default_factory=lambda: _float("HOLD_LIQ_DRAIN_PCT", 35))
-    # Top10 holder konsantrasyonu pp olarak bu kadar sıçrarsa whale alımı/insider → kapat
-    hold_top10_spike_pp: float = field(default_factory=lambda: _float("HOLD_TOP10_SPIKE_PP", 8))
+    # Top10 holder konsantrasyonu pp sıçraması: erken aşamada top10 yüksek olur,
+    # check'in faydası az. Default 999 = disabled. Etkinleştirmek için düşür.
+    hold_top10_spike_pp: float = field(default_factory=lambda: _float("HOLD_TOP10_SPIKE_PP", 999))
 
     # Insider exit detection: entry holder'larından N kadarı bakiyesinin X%'ini düşürürse kapat
     hold_insider_exit_min_drop_pct: float = field(default_factory=lambda: _float("HOLD_INSIDER_EXIT_MIN_DROP_PCT", 50))
