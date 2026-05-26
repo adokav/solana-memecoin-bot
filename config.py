@@ -99,16 +99,16 @@ class Config:
     breakeven_after_tp1: bool = field(default_factory=lambda: _bool("BREAKEVEN_AFTER_TP1", True))
 
     # --- KATMAN 1: Erken giriş ---
-    # NOT: İlk 1-4 saat sniper/insider bölgesi; 4h sonrası sweet spot
-    early_min_liq: float = field(default_factory=lambda: _float("EARLY_MIN_LIQUIDITY", 25000))
-    early_max_liq: float = field(default_factory=lambda: _float("EARLY_MAX_LIQUIDITY", 150000))
-    early_min_age_h: float = field(default_factory=lambda: _float("EARLY_MIN_AGE_H", 4))
+    # BASIT KURAL: fresh + canlı aktivite + alıcı çoğunluk. Aşırı sıkı değil.
+    early_min_liq: float = field(default_factory=lambda: _float("EARLY_MIN_LIQUIDITY", 3000))
+    early_max_liq: float = field(default_factory=lambda: _float("EARLY_MAX_LIQUIDITY", 300000))
+    early_min_age_h: float = field(default_factory=lambda: _float("EARLY_MIN_AGE_H", 0.5))
     early_max_age_h: float = field(default_factory=lambda: _float("EARLY_MAX_AGE_H", 24))
-    early_min_vol_h1_ratio: float = field(default_factory=lambda: _float("EARLY_MIN_VOL_H1_RATIO", 0.5))
-    early_min_price_h1: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_H1", 15))
-    early_min_price_m5: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_M5", 3))
-    early_min_txns_h1: int = field(default_factory=lambda: _int("EARLY_MIN_TXNS_H1", 80))
-    early_min_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MIN_BUY_RATIO", 0.60))
+    early_min_vol_h1_ratio: float = field(default_factory=lambda: _float("EARLY_MIN_VOL_H1_RATIO", 0.3))
+    early_min_price_h1: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_H1", 5))
+    early_min_price_m5: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_M5", -5))
+    early_min_txns_h1: int = field(default_factory=lambda: _int("EARLY_MIN_TXNS_H1", 15))
+    early_min_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MIN_BUY_RATIO", 0.50))
     # Wash trading tipik 0.85-0.93 aralığında çalışır; üst sınırı oraya bastır
     early_max_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MAX_BUY_RATIO", 0.88))
 
@@ -129,7 +129,7 @@ class Config:
 
     # Multi-timeframe momentum confirmation
     # EARLY: h6 fiyat değişimi bu eşikten düşükse "toparlanma" şüphesi → ele
-    early_min_price_h6: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_H6", -30))
+    early_min_price_h6: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_H6", -50))
     # TREND: h1 fiyat değişimi bu eşikten düşükse "trend tükendi" → ele
     # Memecoin'ler dakika dakika dalgalı; -10 daha gerçekçi
     trend_min_price_h1: float = field(default_factory=lambda: _float("TREND_MIN_PRICE_H1", -10))
@@ -140,29 +140,33 @@ class Config:
     liq_history_window_min: int = field(default_factory=lambda: _int("LIQ_HISTORY_WINDOW_MIN", 120))
     liq_history_min_age_min: int = field(default_factory=lambda: _int("LIQ_HISTORY_MIN_AGE_MIN", 20))
 
-    # --- KATMAN 2: Anti-rug ---
+    # --- KATMAN 2: Anti-rug (BASIT) ---
+    # Sadece gerçek rug riskini önleyen 3 ana kontrol:
+    #   1) mint authority revoked → infinite mint olmasın
+    #   2) freeze authority revoked → cüzdan dondurulmasın
+    #   3) honeypot sim → satılabilirlik testi (jupiter.py'de)
+    # LP lock + holder count gibi şartlar erken aşama coin'lerde mevcut değil
+    # ama gerçek rug indikatörü değiller; opt-in bıraktım.
     require_mint_revoked: bool = field(default_factory=lambda: _bool("REQUIRE_MINT_REVOKED", True))
     require_freeze_revoked: bool = field(default_factory=lambda: _bool("REQUIRE_FREEZE_REVOKED", True))
-    require_lp_locked: bool = field(default_factory=lambda: _bool("REQUIRE_LP_LOCKED", True))
-    min_lp_locked_pct: float = field(default_factory=lambda: _float("MIN_LP_LOCKED_PCT", 95))
-    # %95 kilit ama 1 gün vade = anlamsız; minimum kalan süre
-    min_lp_lock_days: float = field(default_factory=lambda: _float("MIN_LP_LOCK_DAYS", 30))
-    # Insider network: aynı kaynaktan finanse edilmiş cüzdan kümesi
-    max_insider_supply_pct: float = field(default_factory=lambda: _float("MAX_INSIDER_SUPPLY_PCT", 10))
-    # Gerçek dağılımda top10 nadiren %22'yi geçer; üstü sybil farm sinyali
-    max_top10_holder_pct: float = field(default_factory=lambda: _float("MAX_TOP10_HOLDER_PCT", 22))
-    max_top1_holder_pct: float = field(default_factory=lambda: _float("MAX_TOP1_HOLDER_PCT", 6))
-    min_holder_count: int = field(default_factory=lambda: _int("MIN_HOLDER_COUNT", 300))
-    # Holder büyüme: 1h içinde belirgin düşüş → ele (insider exit / honeypot)
-    # Memecoin holder turnover'ı yüksek, %12 daha gerçekçi
-    max_holder_drop_pct: float = field(default_factory=lambda: _float("MAX_HOLDER_DROP_PCT", 12))
+    # LP lock zorunluluğu KAPALI — fresh launch'larda LP genelde lock'lanmamış
+    require_lp_locked: bool = field(default_factory=lambda: _bool("REQUIRE_LP_LOCKED", False))
+    min_lp_locked_pct: float = field(default_factory=lambda: _float("MIN_LP_LOCKED_PCT", 0))
+    min_lp_lock_days: float = field(default_factory=lambda: _float("MIN_LP_LOCK_DAYS", 0))
+    max_insider_supply_pct: float = field(default_factory=lambda: _float("MAX_INSIDER_SUPPLY_PCT", 25))
+    # Erken aşamada top10 konsantrasyonu yüksek olur — sadece aşırı uçları engelle
+    max_top10_holder_pct: float = field(default_factory=lambda: _float("MAX_TOP10_HOLDER_PCT", 45))
+    max_top1_holder_pct: float = field(default_factory=lambda: _float("MAX_TOP1_HOLDER_PCT", 15))
+    min_holder_count: int = field(default_factory=lambda: _int("MIN_HOLDER_COUNT", 30))
+    # Holder turnover yüksek erken aşamada — sadece dramatik düşüşler
+    max_holder_drop_pct: float = field(default_factory=lambda: _float("MAX_HOLDER_DROP_PCT", 25))
     holder_history_min_age_min: int = field(default_factory=lambda: _int("HOLDER_HISTORY_MIN_AGE_MIN", 30))
     holder_history_window_min: int = field(default_factory=lambda: _int("HOLDER_HISTORY_WINDOW_MIN", 180))
 
     # Dev wallet (creator) takibi: serial rugger'lar
-    # Meşru takım ortalama 2-3 token açar; 10+ ciddi şüphe
+    # Meşru takım ortalama 2-3 token açar; 15+ ciddi şüphe (memecoin dev'leri seri çıkış yapar)
     dev_wallet_check_enabled: bool = field(default_factory=lambda: _bool("DEV_WALLET_CHECK_ENABLED", True))
-    max_creator_tokens: int = field(default_factory=lambda: _int("MAX_CREATOR_TOKENS", 10))
+    max_creator_tokens: int = field(default_factory=lambda: _int("MAX_CREATOR_TOKENS", 15))
 
     # --- Otomatik alım & devre kesici ---
     # Default kapalı — paper data ile edge doğrulandıktan sonra aç
@@ -374,8 +378,10 @@ class Config:
 
     # --- Skor ---
     # Daha seçici: alert için 55, yüksek güven 72
-    min_score_to_alert: float = field(default_factory=lambda: _float("MIN_SCORE_TO_ALERT", 55))
-    high_confidence_score: float = field(default_factory=lambda: _float("HIGH_CONFIDENCE_SCORE", 72))
+    # Skor eşiği — erken aşamada birçok component 0 (twitter/ml/lunar yok),
+    # bu yüzden alt bar düşürüldü. Yüksek-güven yine de 70+ kalsın.
+    min_score_to_alert: float = field(default_factory=lambda: _float("MIN_SCORE_TO_ALERT", 35))
+    high_confidence_score: float = field(default_factory=lambda: _float("HIGH_CONFIDENCE_SCORE", 65))
 
     # --- Loop ---
     scan_interval: int = field(default_factory=lambda: _int("SCAN_INTERVAL", 60))
