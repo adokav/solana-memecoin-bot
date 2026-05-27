@@ -1,47 +1,41 @@
-# Render Blueprint - Alert-only Background Worker + Persistent Disk
+# Render Blueprint - Background Worker + Persistent Disk
+#
+# Bu dosya GitHub'a push'lanınca Render otomatik tanır.
+# Manuel ekleme yerine "Blueprint" sekmesinden de import edebilirsin.
 
 services:
   - type: worker
-    name: memecoin-alert-bot
+    name: memecoin-sniper
     runtime: python
-    plan: starter
-    region: frankfurt
+    plan: starter            # $7/ay, 512MB RAM, uyumaz
+    region: frankfurt        # TR'ye en yakın
     branch: main
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
     autoDeploy: true
 
     envVars:
+      # Bu üçü Render dashboard'dan elle gireceksin (secret)
       - key: TOKEN
         sync: false
       - key: CHAT_ID
         sync: false
-      - key: SOLANA_RPC_URL
-        sync: false
       - key: WALLET_PRIVATE_KEY
         sync: false
+      - key: SOLANA_RPC_URL
+        sync: false
+      - key: HELIUS_API_KEY
+        sync: false
 
+      # Diğerleri default - istediğin zaman dashboard'dan değiştirebilirsin
       - key: DATA_DIR
         value: /data
-      - key: AUTO_BUY_ENABLED
-        value: "false"
-      - key: WATCH_AFTER_ALERT
-        value: "true"
-
-      - key: MIN_LIQ_USD
-        value: "8000"
-      - key: MIN_TXNS_H1
-        value: "35"
-      - key: MIN_BUY_RATIO
-        value: "0.52"
-      - key: MAX_BUY_RATIO
-        value: "0.92"
-      - key: MIN_VOLUME_LIQ_H1
-        value: "0.30"
-      - key: MAX_PRICE_H1
+      - key: BUY_AMOUNT_SOL
+        value: "0.01"
+      - key: SLIPPAGE_BPS
         value: "300"
 
     disk:
-      name: watchlist-disk
+      name: positions-disk
       mountPath: /data
       sizeGB: 1

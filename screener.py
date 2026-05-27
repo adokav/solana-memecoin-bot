@@ -100,11 +100,11 @@ class Screener:
             else:
                 mints.append(addr)
         result.unique_mints = len(seen)
-        result.fetched = min(len(mints), config.max_mints_per_scan)
+        result.fetched = min(len(mints), 80)
 
         # 2-4. Her mint için pair fetch + parse + filter
         candidates: list[Candidate] = []
-        for mint in mints[:config.max_mints_per_scan]:
+        for mint in mints[:80]:
             pairs = await self.ds.pairs_for_token("solana", mint)
             if not pairs:
                 result.no_pairs += 1
