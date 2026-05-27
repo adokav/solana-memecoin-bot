@@ -1,816 +1,173 @@
-"""KATMAN 1: Fırsat avı.
+"""Screener — aday mint'leri toplar, 5 hard gate'ten geçirir.
 
-İki paralel profil:
-  - EARLY: 1-24h yaşında, momentum başlangıcı yakala
-  - TREND: 24h-7g yaşında, yerleşmiş ama hâlâ koşan
-
-Olmazsa olmaz filtreleri geçen aday → 0-100 skor → yüksek skorlar alert
+Akış (linear, basit):
+  1. Kaynaklardan mint listesi al (DS latest_profiles + boosted + top + pump.fun graduate)
+  2. Her mint için DS pair fetch (en likit pair)
+  3. Candidate parse
+  4. filter.passes() — 5 hard gate
+  5. Pass eden mint'ler döner — safety + buy main.py'da
 """
+from __future__ import annotations
+
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Literal
 
+from candidate import Candidate, parse as parse_candidate
 from config import config
 from dexscreener import DexScreener
-from lunarcrush import LunarCrush
+from filter import passes as filter_passes
 from pumpfun import PumpFun
-from smart_wallets import SmartWalletStore
-from telegram_channels import TelegramMentionStore
-from twitter import TwitterStore
-
-try:
-    from ml import ModelBundle, extract_features_from_dict, predict_win_probability
-    _ML_IMPORT_OK = True
-except Exception:
-    _ML_IMPORT_OK = False
-    ModelBundle = None  # type: ignore
 
 log = logging.getLogger(__name__)
 
-Profile = Literal["early", "trend"]
-
 
 @dataclass
-class Candidate:
-    chain: str
-    pair_address: str
-    base_token: str
-    base_symbol: str
-    quote_symbol: str
-    dex: str
-    price_usd: float
-    liquidity_usd: float
-    fdv: float
-    volume_h24: float
-    volume_h6: float
-    volume_h1: float
-    volume_m5: float
-    price_change_h24: float
-    price_change_h6: float
-    price_change_h1: float
-    price_change_m5: float
-    txns_h1: int
-    buys_h1: int
-    sells_h1: int
-    pair_age_h: float
-    boosts_active: int
-    has_twitter: bool
-    has_telegram: bool
-    has_website: bool
-    url: str
-    profile: Profile = "early"
-    score: float = 0
-    score_breakdown: dict = field(default_factory=dict)
+class ScanResult:
+    """Diagnostic — /scan_stats için."""
+    ts: float = 0.0
+    src_ds_profiles: int = 0
+    src_ds_boosted: int = 0
+    src_ds_top: int = 0
+    src_pump: int = 0
+    unique_mints: int = 0
+    on_cooldown: int = 0
+    fetched: int = 0
+    no_pairs: int = 0
+    parse_fail: int = 0
+    filter_fail: int = 0
+    passed: int = 0
+    sample_filter_reasons: list[str] = field(default_factory=list)
 
-
-# ---------- DexScreener pair -> Candidate ----------
-
-def _parse_pair(p: dict) -> Candidate | None:
-    try:
-        liq = (p.get("liquidity") or {})
-        vol = (p.get("volume") or {})
-        chg = (p.get("priceChange") or {})
-        txns = (p.get("txns") or {})
-        h1_txns = (txns.get("h1") or {})
-        buys_h1 = int(h1_txns.get("buys", 0))
-        sells_h1 = int(h1_txns.get("sells", 0))
-
-        created_ms = p.get("pairCreatedAt") or 0
-        age_h = (time.time() * 1000 - created_ms) / 3_600_000 if created_ms else 9999
-
-        info = p.get("info") or {}
-        socials = {s.get("type", "").lower(): s.get("url") for s in (info.get("socials") or [])}
-        websites = info.get("websites") or []
-        boosts = (p.get("boosts") or {}).get("active", 0)
-
-        return Candidate(
-            chain=p.get("chainId", ""),
-            pair_address=p.get("pairAddress", ""),
-            base_token=(p.get("baseToken") or {}).get("address", ""),
-            base_symbol=(p.get("baseToken") or {}).get("symbol", "?"),
-            quote_symbol=(p.get("quoteToken") or {}).get("symbol", "?"),
-            dex=p.get("dexId", ""),
-            price_usd=float(p.get("priceUsd") or 0),
-            liquidity_usd=float(liq.get("usd") or 0),
-            fdv=float(p.get("fdv") or 0),
-            volume_h24=float(vol.get("h24") or 0),
-            volume_h6=float(vol.get("h6") or 0),
-            volume_h1=float(vol.get("h1") or 0),
-            volume_m5=float(vol.get("m5") or 0),
-            price_change_h24=float(chg.get("h24") or 0),
-            price_change_h6=float(chg.get("h6") or 0),
-            price_change_h1=float(chg.get("h1") or 0),
-            price_change_m5=float(chg.get("m5") or 0),
-            txns_h1=buys_h1 + sells_h1,
-            buys_h1=buys_h1,
-            sells_h1=sells_h1,
-            pair_age_h=age_h,
-            boosts_active=int(boosts) if boosts else 0,
-            has_twitter="twitter" in socials,
-            has_telegram="telegram" in socials,
-            has_website=bool(websites),
-            url=p.get("url", ""),
-        )
-    except (TypeError, ValueError) as e:
-        log.debug("pair parse error: %s", e)
-        return None
-
-
-# ---------- Hızlı eler (genel kalite kontrolü) ----------
-
-def _basic_sanity(c: Candidate) -> tuple[bool, str]:
-    if c.chain != "solana":
-        return False, "not solana"
-    if c.quote_symbol.upper() not in {"SOL", "WSOL", "USDC"}:
-        return False, f"unsupported quote {c.quote_symbol}"
-    if c.price_usd <= 0 or c.liquidity_usd <= 0:
-        return False, "zero price/liq"
-    # Honeypot klasiği: hiç satış olmamış
-    if c.txns_h1 >= 20 and c.sells_h1 == 0:
-        return False, "no sells (honeypot suspicion)"
-    # Wash trading şüphesi (üst sınır)
-    if c.txns_h1 >= 50:
-        buy_ratio = c.buys_h1 / max(c.txns_h1, 1)
-        if buy_ratio > config.early_max_buy_ratio:
-            return False, f"wash trading suspicion ({buy_ratio:.0%} buys)"
-    # Ortalama işlem boyutu: çok küçük = micro-spam, çok büyük = whale wash
-    if c.txns_h1 >= config.avg_tx_min_txns and c.volume_h1 > 0:
-        avg_tx = c.volume_h1 / c.txns_h1
-        if avg_tx < config.min_avg_tx_size_usd:
-            return False, f"avg tx too small: ${avg_tx:.1f} (micro-spam)"
-        if avg_tx > config.max_avg_tx_size_usd:
-            return False, f"avg tx too large: ${avg_tx:.0f} (whale/wash)"
-    return True, "ok"
-
-
-# ---------- Profil filtreleri ----------
-
-def _check_early(c: Candidate) -> tuple[bool, str]:
-    if not (config.early_min_age_h <= c.pair_age_h <= config.early_max_age_h):
-        return False, f"early age out: {c.pair_age_h:.1f}h"
-    if not (config.early_min_liq <= c.liquidity_usd <= config.early_max_liq):
-        return False, f"early liq out: ${c.liquidity_usd:.0f}"
-    vol_ratio = c.volume_h1 / max(c.liquidity_usd, 1)
-    if vol_ratio < config.early_min_vol_h1_ratio:
-        return False, f"early vol/liq low: {vol_ratio:.2f}"
-    if c.price_change_h1 < config.early_min_price_h1:
-        return False, f"early h1 weak: {c.price_change_h1:.1f}%"
-    if c.price_change_m5 < config.early_min_price_m5:
-        return False, f"early m5 weak: {c.price_change_m5:.1f}%"
-    # Multi-timeframe: h6 büyük dump'tan sonra toparlanma sahte sinyal verebilir
-    if c.price_change_h6 < config.early_min_price_h6:
-        return False, f"early h6 crashed: {c.price_change_h6:.1f}%"
-    if c.txns_h1 < config.early_min_txns_h1:
-        return False, f"early txns low: {c.txns_h1}"
-    buy_ratio = c.buys_h1 / max(c.txns_h1, 1)
-    if buy_ratio < config.early_min_buy_ratio:
-        return False, f"early buys ratio low: {buy_ratio:.2f}"
-    return True, "early ok"
-
-
-def _check_trend(c: Candidate) -> tuple[bool, str]:
-    if not (config.trend_min_age_h <= c.pair_age_h <= config.trend_max_age_h):
-        return False, f"trend age out: {c.pair_age_h:.1f}h"
-    if c.liquidity_usd < config.trend_min_liq:
-        return False, f"trend liq low: ${c.liquidity_usd:.0f}"
-    if c.volume_h6 < config.trend_min_vol_h6:
-        return False, f"trend vol_h6 low: ${c.volume_h6:.0f}"
-    if c.price_change_h6 < config.trend_min_price_h6:
-        return False, f"trend h6 weak: {c.price_change_h6:.1f}%"
-    if c.price_change_h24 < config.trend_min_price_h24:
-        return False, f"trend h24 weak: {c.price_change_h24:.1f}%"
-    # Multi-timeframe: h1 negatifse trend zirvede / dönüyor olabilir
-    if c.price_change_h1 < config.trend_min_price_h1:
-        return False, f"trend h1 reversing: {c.price_change_h1:.1f}%"
-    if c.txns_h1 < config.trend_min_txns_h1:
-        return False, f"trend txns low: {c.txns_h1}"
-    return True, "trend ok"
-
-
-# ---------- 0-100 skor sistemi ----------
-
-# Profile-aware ağırlıklar: aynı feature early vs trend için farklı önemde.
-# Default ON; PROFILE_AWARE_SCORING=false ile düz hesaplamaya geri dönülür.
-PROFILE_WEIGHTS = {
-    "early": {
-        "momentum": 1.2,       # h1/h6 patlama erken giriş için kritik
-        "vol_liq": 1.1,
-        "buy_pressure": 1.0,
-        "acceleration": 1.3,   # m5 ivmesi yeni başlayan trend göstergesi
-        "social": 0.8,         # yeni tokenlarda sosyal henüz oluşmamış olabilir
-        "age_fit": 1.2,
-        "liq_quality": 0.7,    # FDV/liq erken aşamada genellikle çarpık
-        "holder_health": 1.0,
-        "smart_signal": 1.1,   # erken aşamada smart wallet alımı çok kıymetli
-        "social_external": 0.9,  # yeni tokenlarda LunarCrush coverage zayıf
-        "ml_predicted": 1.0,
-        "buy_velocity": 1.3,   # erken aşamada accumulation güçlü sinyal
-        "liq_dispersion": 0.5, # yeni token tek pool'da normal, az ağırlık
-        "price_consistency": 0.8,  # tek pool varsa zaten tutarlı, daha az ağırlık
-        "twitter_mentions": 1.2,   # KOL mention erken aşamada güçlü sinyal
-        "telegram_mentions": 1.3,  # alfa kanalları erken aşamada en hızlı sinyal
-    },
-    "trend": {
-        "momentum": 0.9,
-        "vol_liq": 1.2,        # sürdürülebilir hacim oturmuş token için kritik
-        "buy_pressure": 1.1,
-        "acceleration": 0.7,   # m5 ivmesi geç aşamada anlamlı değil
-        "social": 1.2,         # oturmuş projeler gerçek sosyal trafiğe sahip
-        "age_fit": 1.0,
-        "liq_quality": 1.3,    # ciddi tokenlar düzgün liq/fdv oranına sahip olmalı
-        "holder_health": 1.0,
-        "smart_signal": 1.0,
-        "social_external": 1.3,  # trend için LunarCrush coverage iyi, yüksek ağırlık
-        "ml_predicted": 1.0,
-        "buy_velocity": 1.0,
-        "liq_dispersion": 1.2, # trend tokenda çok pool = sağlık
-        "price_consistency": 1.3,  # trend tokenda tutarlılık kritik (stale pool = red flag)
-        "twitter_mentions": 1.0,
-        "telegram_mentions": 1.0,
-    },
-}
-
-
-def _apply_profile_weights(breakdown: dict, profile: str) -> dict:
-    if not config.profile_aware_scoring:
-        return breakdown
-    weights = PROFILE_WEIGHTS.get(profile)
-    if not weights:
-        return breakdown
-    return {k: round(v * weights.get(k, 1.0), 1) for k, v in breakdown.items()}
-
-
-def _score(
-    c: Candidate,
-    smart_weight: float = 0.0,
-    buy_velocity: float = 0.0,
-    liq_dispersion: float = 0.0,
-    price_consistency: float = 0.0,
-    twitter_mention_bonus: float = 0.0,
-    telegram_mention_bonus: float = 0.0,
-) -> tuple[float, dict]:
-    breakdown: dict = {}
-
-    # Momentum (max 25)
-    momentum_raw = (c.price_change_h1 * 1.5) + (c.price_change_h6 * 0.8)
-    momentum = min(25.0, momentum_raw / 4.0)
-    breakdown["momentum"] = round(momentum, 1)
-
-    # Volume/Liquidity oranı (max 20)
-    vol_liq = c.volume_h1 / max(c.liquidity_usd, 1)
-    vol_score = min(20.0, vol_liq * 20)  # 1.0 oran = tam puan
-    breakdown["vol_liq"] = round(vol_score, 1)
-
-    # Net alıcı baskısı (max 15)
-    if c.txns_h1 > 0:
-        buy_ratio = c.buys_h1 / c.txns_h1
-        # 0.5 nötr, 0.7+ tam puan
-        buy_score = max(0, min(15.0, (buy_ratio - 0.5) * 75))
-    else:
-        buy_score = 0
-    breakdown["buy_pressure"] = round(buy_score, 1)
-
-    # Hacim ivmesi (max 10) - son 5dk × 12 vs son 1h
-    accel = (c.volume_m5 * 12) / max(c.volume_h1, 1)
-    accel_score = min(10.0, accel * 6.67)  # 1.5x = tam puan
-    breakdown["acceleration"] = round(accel_score, 1)
-
-    # Boost + sosyal (max 10) - gerçek proje işareti olarak twitter+website kombosunu ödüllendir
-    social = 0
-    if c.boosts_active > 0:
-        social += 3  # boosts paralı, ağırlık biraz düşük
-    if c.has_twitter and c.has_website:
-        social += 5  # kombo: ciddi proje sinyali
-    elif c.has_twitter or c.has_website:
-        social += 2
-    if c.has_telegram:
-        social += 2
-    breakdown["social"] = min(10, social)
-
-    # Yaş sweet spot (max 5)
-    # EARLY için 2-12h tam, TREND için 24-72h tam
-    if c.profile == "early":
-        if 2 <= c.pair_age_h <= 12:
-            age_score = 5
-        elif c.pair_age_h < 2:
-            age_score = 2  # çok yeni risk
-        else:
-            age_score = max(0, 5 - (c.pair_age_h - 12) * 0.2)
-    else:
-        if 24 <= c.pair_age_h <= 72:
-            age_score = 5
-        else:
-            age_score = max(0, 5 - abs(c.pair_age_h - 48) * 0.05)
-    breakdown["age_fit"] = round(age_score, 1)
-
-    # Likidite kalitesi - FDV oranı (max 5)
-    if c.fdv > 0:
-        liq_fdv = c.liquidity_usd / c.fdv
-        if liq_fdv >= 0.1:
-            liq_score = 5
-        elif liq_fdv >= 0.05:
-            liq_score = 3
-        elif liq_fdv >= 0.02:
-            liq_score = 1
-        else:
-            liq_score = 0
-    else:
-        liq_score = 2
-    breakdown["liq_quality"] = round(liq_score, 1)
-
-    # Holder sağlığı placeholder (max 10) - rugcheck.py'de doldurulacak
-    breakdown["holder_health"] = 0
-
-    # Smart wallet sinyali (max 25) — quality-weighted
-    # Bir cüzdan quality_score/50 oranında katılır (Q=50 → 1.0, Q=80 → 1.6)
-    # raw_weight 1.0 = ~8 puan, doygun olarak 4.0 → 25 puan
-    smart_signal = 0.0
-    if smart_weight > 0:
-        smart_signal = min(25.0, smart_weight * 7.0 + 1.0)
-    breakdown["smart_signal"] = round(smart_signal, 1)
-
-    # Buy ratio velocity (max 10) — kısa zamanda alıcı oranı artıyor mu
-    # Pozitif velocity = artan alım baskısı = bullish accumulation
-    # >0.05 = saatte +5pp artış → tam puan
-    bv_score = 0.0
-    if buy_velocity > 0:
-        bv_score = min(10.0, buy_velocity * 200)
-    breakdown["buy_velocity"] = round(bv_score, 1)
-
-    # Liquidity dispersion (max 5) — kaç pool'da dağılmış
-    # 1 pool = 0, 2 pool = 2.5, 3+ pool = 5 (kademe ile)
-    # Dağınık likidite = daha olgun token, daha az "rug riski"
-    ld_score = min(5.0, liq_dispersion)
-    breakdown["liq_dispersion"] = round(ld_score, 1)
-
-    # Price consistency (max 5) — cross-DEX fiyat tutarlılığı
-    # 0..1 arası: 1 = mükemmel (tüm pool'larda aynı fiyat)
-    # 0 = stale pool / mixed liquidity → riskli sinyal
-    breakdown["price_consistency"] = round(price_consistency * 5, 1)
-
-    # Twitter mentions (max 15) — kaç influencer aynı tokeni mention etti
-    # her unique handle TWITTER_MENTION_SCORE (5pt) getirir, max 15
-    breakdown["twitter_mentions"] = round(min(15.0, twitter_mention_bonus), 1)
-
-    # Telegram channel mentions (max 15) — alfa kanalları
-    breakdown["telegram_mentions"] = round(min(15.0, telegram_mention_bonus), 1)
-
-    # Profile-aware ağırlıklar (varsa)
-    breakdown = _apply_profile_weights(breakdown, c.profile)
-    total = sum(breakdown.values())
-    return round(total, 1), breakdown
-
-
-# ---------- Ana Screener ----------
 
 class Screener:
-    def __init__(
-        self,
-        ds: DexScreener,
-        pf: PumpFun | None = None,
-        smart: SmartWalletStore | None = None,
-        lunar: LunarCrush | None = None,
-        ml_bundle=None,
-        twitter_store: TwitterStore | None = None,
-        mev_store=None,
-        telegram_store: TelegramMentionStore | None = None,
-    ) -> None:
+    def __init__(self, ds: DexScreener, pf: PumpFun) -> None:
         self.ds = ds
         self.pf = pf
-        self.smart = smart
-        self.lunar = lunar
-        self.ml_bundle = ml_bundle  # ModelBundle veya None
-        self.twitter_store = twitter_store
-        self.mev_store = mev_store  # MevStore — DEX cooldown kontrolü için
-        self.telegram_store = telegram_store
-        # {base_token: (last_alerted_ts, score)}  score=0 → red (rug/honeypot), uzun cooldown
-        self._cooldown: dict[str, tuple[float, float]] = {}
-        # {base_token: [(ts, liquidity_usd), ...]}  son N dakikadaki likidite snapshot'ları
-        self._liq_history: dict[str, list[tuple[float, float]]] = {}
-        # {base_token: [(ts, buy_ratio), ...]}  buy ratio velocity için
-        self._buy_ratio_history: dict[str, list[tuple[float, float]]] = {}
-        # Fast-poll loop'tan gelen, sıradaki scan'de ÖNCELİKLE işlenecek mint'ler
-        # (pump.fun graduate, DS latest_boosted, smart wallet inject vb. — time-sensitive)
-        self._priority_queue: set[str] = set()
-        # Son N tarama özetleri — /scan_stats için visibility
-        self._scan_history: list[dict] = []
+        # token → (last_seen_ts, passed_bool)
+        self._cooldown: dict[str, tuple[float, bool]] = {}
+        # Son 10 scan diagnostic
+        self._history: list[ScanResult] = []
 
-    def enqueue_priority(self, mints: list[str]) -> int:
-        """Fast-poll'dan gelen mint'leri öncelikli işleme kuyruğuna ekle."""
-        before = len(self._priority_queue)
-        for m in mints:
-            if m:
-                self._priority_queue.add(m)
-        return len(self._priority_queue) - before
-
-    def _record_liquidity(self, token: str, liq: float) -> None:
-        now = time.time()
-        cutoff = now - config.liq_history_window_min * 60
-        hist = [(ts, lq) for ts, lq in self._liq_history.get(token, []) if ts > cutoff]
-        hist.append((now, liq))
-        self._liq_history[token] = hist
-
-    def _liquidity_drawdown(self, token: str, current_liq: float) -> float | None:
-        """En eski snapshot yeterince eskiyse, peak'ten % düşüşü döner. Yoksa None."""
-        hist = self._liq_history.get(token) or []
-        if not hist:
-            return None
-        oldest_ts = hist[0][0]
-        if (time.time() - oldest_ts) < config.liq_history_min_age_min * 60:
-            return None
-        peak = max(lq for _, lq in hist)
-        if peak <= 0:
-            return None
-        return (peak - current_liq) / peak * 100
-
-    def _record_buy_ratio(self, token: str, ratio: float) -> None:
-        now = time.time()
-        cutoff = now - 30 * 60  # 30dk sliding window
-        hist = [(ts, r) for ts, r in self._buy_ratio_history.get(token, []) if ts > cutoff]
-        hist.append((now, ratio))
-        self._buy_ratio_history[token] = hist
-
-    def _buy_ratio_velocity(self, token: str) -> float:
-        """Saatte buy ratio değişimi (pp/saat). Pozitif = artıyor (bullish)."""
-        hist = self._buy_ratio_history.get(token) or []
-        if len(hist) < 2:
-            return 0.0
-        ts_first, r_first = hist[0]
-        ts_last, r_last = hist[-1]
-        elapsed_h = (ts_last - ts_first) / 3600
-        if elapsed_h < 0.05:  # min 3 dakika ölçüm
-            return 0.0
-        return (r_last - r_first) / elapsed_h
-
-    @staticmethod
-    def _compute_liq_dispersion(pairs: list[dict]) -> float:
-        """Likidite kaç farklı pool'a yayılmış? 0=tek pool, 5=çok pool."""
-        if not pairs:
-            return 0.0
-        # En az 1k$ likiditesi olan pool'ları say
-        active_pools = sum(
-            1 for p in pairs
-            if float((p.get("liquidity") or {}).get("usd") or 0) >= 1000
-        )
-        if active_pools <= 1:
-            return 0.0
-        if active_pools == 2:
-            return 2.5
-        if active_pools == 3:
-            return 4.0
-        return 5.0
-
-    @staticmethod
-    def _compute_price_consistency(pairs: list[dict]) -> float:
-        """Cross-DEX fiyat tutarlılığı: 0=büyük disparity, 1=mükemmel uyum.
-
-        Sadece >= $1k likidite pool'ları sayılır. Tek pool varsa 1.0 (vakuumda
-        tutarlı). 2+ pool varsa max/min fiyat oranı:
-          - oran ≤ 1.01 (%1 fark) → 1.0
-          - oran ≥ 1.10 (%10 fark) → 0.0
-          - ara: lineer interpolasyon
-        """
-        if not pairs:
-            return 0.0
-        active = []
-        for p in pairs:
-            try:
-                liq = float((p.get("liquidity") or {}).get("usd") or 0)
-                price = float(p.get("priceUsd") or 0)
-            except (TypeError, ValueError):
-                continue
-            if liq >= 1000 and price > 0:
-                active.append(price)
-        if len(active) <= 1:
-            return 1.0
-        max_p = max(active)
-        min_p = min(active)
-        if min_p <= 0:
-            return 0.0
-        ratio = max_p / min_p
-        if ratio <= 1.01:
-            return 1.0
-        if ratio >= 1.10:
-            return 0.0
-        # Lineer: 1.01 → 1.0, 1.10 → 0.0
-        return max(0.0, 1.0 - (ratio - 1.01) / 0.09)
-
-    def _cooldown_hours_for(self, score: float) -> float:
-        if score >= config.high_confidence_score:
-            return config.cooldown_hours_high
-        if score >= config.min_score_to_alert:
-            return config.cooldown_hours_mid
-        return config.cooldown_hours_reject
+    def _cooldown_hours(self, passed: bool) -> float:
+        return config.cooldown_hours_pass if passed else config.cooldown_hours_reject
 
     def _on_cooldown(self, token: str) -> bool:
-        entry = self._cooldown.get(token)
-        if not entry:
+        e = self._cooldown.get(token)
+        if not e:
             return False
-        last_ts, last_score = entry
-        return (time.time() - last_ts) < (self._cooldown_hours_for(last_score) * 3600)
+        ts, passed = e
+        return (time.time() - ts) < (self._cooldown_hours(passed) * 3600)
 
-    def mark_alerted(self, token: str, score: float = 0.0) -> None:
-        self._cooldown[token] = (time.time(), score)
+    def mark_seen(self, token: str, passed: bool) -> None:
+        self._cooldown[token] = (time.time(), passed)
 
-    async def scan(self) -> list[Candidate]:
-        """Yeni token havuzunu çek, ikili profilden geçenleri döner (skorla sıralı)."""
-        seen_tokens: set[str] = set()
-        sol_tokens: list[str] = []
-        on_cd = 0
+    async def scan(self) -> tuple[list[Candidate], ScanResult]:
+        """Bir tarama turu döndürür: (geçen aday listesi, diagnostic)."""
+        result = ScanResult(ts=time.time())
 
-        # Priority queue (fast-poll'dan gelen time-sensitive mint'ler) önce
-        priority_count = 0
-        if self._priority_queue:
-            for addr in list(self._priority_queue):
-                if addr in seen_tokens:
-                    continue
-                seen_tokens.add(addr)
-                if self._on_cooldown(addr):
-                    on_cd += 1
-                else:
-                    sol_tokens.append(addr)
-                    priority_count += 1
-            self._priority_queue.clear()
-
+        # 1. Kaynaklardan mint listesi
         src_profiles = await self.ds.latest_profiles()
         src_latest = await self.ds.latest_boosted()
         src_top = await self.ds.top_boosted()
-        for source in (src_profiles, src_latest, src_top):
-            for item in source:
-                if item.get("chainId") != "solana":
-                    continue
-                addr = item.get("tokenAddress")
-                if not addr or addr in seen_tokens:
-                    continue
-                seen_tokens.add(addr)
-                if self._on_cooldown(addr):
-                    on_cd += 1
-                else:
-                    sol_tokens.append(addr)
+        src_pump = await self.pf.recently_graduated()
+        result.src_ds_profiles = len(src_profiles)
+        result.src_ds_boosted = len(src_latest)
+        result.src_ds_top = len(src_top)
+        result.src_pump = len(src_pump)
 
-        # Pump.fun graduation kancası: bonding curve tamamlanan tokenları
-        # DexScreener indexlemeden önce yakala
-        src_pump: list[str] = []
-        if self.pf is not None and config.pumpfun_enabled:
-            src_pump = await self.pf.recently_graduated()
-            for addr in src_pump:
-                if not addr or addr in seen_tokens:
-                    continue
-                seen_tokens.add(addr)
-                if self._on_cooldown(addr):
-                    on_cd += 1
-                else:
-                    sol_tokens.append(addr)
+        seen: set[str] = set()
+        mints: list[str] = []
+        for item in src_profiles + src_latest + src_top:
+            if not isinstance(item, dict):
+                continue
+            if item.get("chainId") != "solana":
+                continue
+            addr = item.get("tokenAddress")
+            if not addr or addr in seen:
+                continue
+            seen.add(addr)
+            if self._on_cooldown(addr):
+                result.on_cooldown += 1
+            else:
+                mints.append(addr)
+        for addr in src_pump:
+            if not addr or addr in seen:
+                continue
+            seen.add(addr)
+            if self._on_cooldown(addr):
+                result.on_cooldown += 1
+            else:
+                mints.append(addr)
+        result.unique_mints = len(seen)
+        result.fetched = min(len(mints), 80)
 
-        # Smart wallet kaynağı: N+ smart wallet aynı tokeni alıyorsa scan'e enjekte et
-        src_smart: list[str] = []
-        if self.smart is not None and config.smart_wallets_enabled:
-            src_smart = self.smart.tokens_with_min_buys(config.smart_min_buys_for_inject)
-            for addr in src_smart:
-                if not addr or addr in seen_tokens:
-                    continue
-                seen_tokens.add(addr)
-                if self._on_cooldown(addr):
-                    on_cd += 1
-                else:
-                    sol_tokens.append(addr)
-
-        log.info(
-            "scan src: priority=%d profiles=%d boosted=%d top=%d pump=%d smart=%d | sol unique=%d | cooldown=%d | to_fetch=%d",
-            priority_count, len(src_profiles), len(src_latest), len(src_top),
-            len(src_pump), len(src_smart),
-            len(seen_tokens), on_cd, min(len(sol_tokens), 80),
-        )
-
-        # Filtre cut sayaçları (gözlem için)
-        cuts = {
-            "no_pairs": 0, "parse_fail": 0, "sanity": 0,
-            "liq_drawdown": 0, "profile": 0, "low_score": 0,
-        }
-        sample_reasons: dict[str, list[str]] = {"sanity": [], "profile": []}
-
+        # 2-4. Her mint için pair fetch + parse + filter
         candidates: list[Candidate] = []
-        for token in sol_tokens[:80]:
-            pairs = await self.ds.pairs_for_token("solana", token)
+        for mint in mints[:80]:
+            pairs = await self.ds.pairs_for_token("solana", mint)
             if not pairs:
-                cuts["no_pairs"] += 1
+                result.no_pairs += 1
                 continue
             pairs.sort(
                 key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0),
                 reverse=True,
             )
-            c = _parse_pair(pairs[0])
-            if not c:
-                cuts["parse_fail"] += 1
+            c = parse_candidate(pairs[0])
+            if c is None:
+                result.parse_fail += 1
                 continue
-            ok, reason = _basic_sanity(c)
+            ok, reason = filter_passes(c)
             if not ok:
-                cuts["sanity"] += 1
-                if len(sample_reasons["sanity"]) < 3:
-                    sample_reasons["sanity"].append(f"{c.base_symbol}:{reason}")
+                result.filter_fail += 1
+                if len(result.sample_filter_reasons) < 5:
+                    result.sample_filter_reasons.append(f"{c.base_symbol}: {reason}")
+                # Filtreyi geçmeyen mint'e kısa cooldown
+                self.mark_seen(c.base_token, passed=False)
                 continue
-
-            # Likidite stabilitesi: snapshot kaydet, drawdown kontrol et
-            self._record_liquidity(c.base_token, c.liquidity_usd)
-            drawdown = self._liquidity_drawdown(c.base_token, c.liquidity_usd)
-            if drawdown is not None and drawdown > config.max_liq_drawdown_pct:
-                cuts["liq_drawdown"] += 1
-                continue
-
-            # İkili profil değerlendirmesi
-            passed_early, early_reason = _check_early(c)
-            passed_trend, trend_reason = _check_trend(c)
-
-            if passed_early:
-                c.profile = "early"
-            elif passed_trend:
-                c.profile = "trend"
-            else:
-                cuts["profile"] += 1
-                if len(sample_reasons["profile"]) < 3:
-                    sample_reasons["profile"].append(
-                        f"{c.base_symbol}:E={early_reason}|T={trend_reason}"
-                    )
-                continue
-
-            smart_weight = 0.0
-            if self.smart is not None and config.smart_wallets_enabled:
-                smart_weight = self.smart.weighted_smart_signal(c.base_token)
-
-            # Buy ratio velocity: kısa sürede alıcı oranı değişim hızı
-            current_buy_ratio = (
-                c.buys_h1 / c.txns_h1 if c.txns_h1 > 0 else 0.0
-            )
-            self._record_buy_ratio(c.base_token, current_buy_ratio)
-            buy_velocity = self._buy_ratio_velocity(c.base_token)
-
-            # Liquidity dispersion: kaç pool'da likidite var
-            liq_dispersion = self._compute_liq_dispersion(pairs)
-            # Cross-DEX fiyat tutarlılığı
-            price_consistency = self._compute_price_consistency(pairs)
-
-            # MEV cooldown: DEX şu an cezalıysa atla
-            if self.mev_store is not None and self.mev_store.is_dex_cooled(c.dex):
-                cuts["sanity"] += 1
-                continue
-
-            # Twitter mention bonus: hem mint adresi hem $SYMBOL key'leri
-            twitter_bonus = 0.0
-            if self.twitter_store is not None and config.twitter_enabled:
-                handles = self.twitter_store.unique_handles_for(c.base_token)
-                handles += self.twitter_store.unique_handles_for(
-                    "$" + c.base_symbol.upper()
-                )
-                twitter_bonus = handles * config.twitter_mention_score
-
-            # Telegram channel mention bonus
-            telegram_bonus = 0.0
-            if (
-                self.telegram_store is not None
-                and config.telegram_channels_enabled
-            ):
-                ch = self.telegram_store.unique_channels_for(c.base_token)
-                ch += self.telegram_store.unique_channels_for(
-                    "$" + c.base_symbol.upper()
-                )
-                telegram_bonus = ch * config.telegram_mention_score
-
-            score, breakdown = _score(
-                c,
-                smart_weight=smart_weight,
-                buy_velocity=buy_velocity,
-                liq_dispersion=liq_dispersion,
-                price_consistency=price_consistency,
-                twitter_mention_bonus=twitter_bonus,
-                telegram_mention_bonus=telegram_bonus,
-            )
-            c.score = score
-            c.score_breakdown = breakdown
-
-            if score < config.min_score_to_alert:
-                cuts["low_score"] += 1
-                continue
-
             candidates.append(c)
 
+        result.passed = len(candidates)
+        self._history.append(result)
+        if len(self._history) > 10:
+            self._history = self._history[-10:]
+
         log.info(
-            "scan cuts: no_pairs=%d parse=%d sanity=%d liq_dd=%d profile=%d low_score=%d -> pass=%d",
-            cuts["no_pairs"], cuts["parse_fail"], cuts["sanity"],
-            cuts["liq_drawdown"], cuts["profile"], cuts["low_score"], len(candidates),
+            "scan: src=(prf=%d boost=%d top=%d pump=%d) unique=%d cd=%d "
+            "fetched=%d cuts=(no_pairs=%d parse=%d filter=%d) → pass=%d",
+            result.src_ds_profiles, result.src_ds_boosted, result.src_ds_top,
+            result.src_pump, result.unique_mints, result.on_cooldown,
+            result.fetched, result.no_pairs, result.parse_fail,
+            result.filter_fail, result.passed,
         )
-        if sample_reasons["sanity"]:
-            log.info("sanity samples: %s", " | ".join(sample_reasons["sanity"]))
-        if sample_reasons["profile"]:
-            log.info("profile samples: %s", " | ".join(sample_reasons["profile"]))
+        if result.sample_filter_reasons:
+            log.info("filter samples: %s", " | ".join(result.sample_filter_reasons))
 
-        candidates.sort(key=lambda x: x.score, reverse=True)
-
-        # LunarCrush enrich — sadece alert'lanmaya en yakın top adaylar için
-        # (free tier rate limit budget'ı koru)
-        if (
-            self.lunar is not None
-            and config.lunarcrush_enabled
-            and config.lunarcrush_api_key
-        ):
-            top_for_lunar = candidates[: max(1, config.max_alerts_per_scan)]
-            for c in top_for_lunar:
-                try:
-                    metrics = await self.lunar.coin_metrics(c.base_symbol)
-                except Exception:
-                    metrics = None
-                if metrics is None or metrics.galaxy_score <= 0:
-                    c.score_breakdown["social_external"] = 0
-                    continue
-                # galaxy_score 0-100 → max 15 puan (profile weight uygulanır)
-                raw = metrics.galaxy_score / 100.0 * 15.0
-                # Profile-aware ağırlık manuel uygulanır (sonradan eklendiği için
-                # _score'un toplu apply'ı çoktan geçti)
-                weights = PROFILE_WEIGHTS.get(c.profile, {})
-                weighted = raw * weights.get("social_external", 1.0)
-                c.score_breakdown["social_external"] = round(weighted, 1)
-                c.score = round(sum(c.score_breakdown.values()), 1)
-
-            # Yeniden sırala
-            candidates.sort(key=lambda x: x.score, reverse=True)
-
-        # ML predicted-win-prob enrichment — model yüklü ise top adaylar için
-        if (
-            _ML_IMPORT_OK
-            and self.ml_bundle is not None
-            and config.ml_enabled
-        ):
-            top_for_ml = candidates[: max(1, config.max_alerts_per_scan)]
-            for c in top_for_ml:
-                hour_utc = int(time.gmtime(time.time()).tm_hour)
-                features = extract_features_from_dict(
-                    c.score_breakdown,
-                    c.profile,
-                    c.liquidity_usd,
-                    0.0,  # entry_top10_pct entry'de henüz bilinmiyor
-                    hour_utc,
-                    entry_price_impact_pct=float(
-                        c.score_breakdown.get("_entry_price_impact_pct") or 0
-                    ),
-                )
-                try:
-                    win_prob = predict_win_probability(self.ml_bundle, features)
-                except Exception:
-                    log.exception("ml predict failed")
-                    win_prob = 0.5
-                ml_points = (win_prob - 0.5) * 2 * config.ml_max_score_points
-                # Mid değer 0.5 → 0 puan, 1.0 → +ml_max, 0.0 → -ml_max
-                c.score_breakdown["ml_predicted"] = round(ml_points, 1)
-                c.score = round(sum(c.score_breakdown.values()), 1)
-            candidates.sort(key=lambda x: x.score, reverse=True)
-
-        # Scan history kaydı — /scan_stats için
-        self._scan_history.append({
-            "ts": time.time(),
-            "src_profiles": len(src_profiles),
-            "src_boosted": len(src_latest),
-            "src_top": len(src_top),
-            "src_pump": len(src_pump),
-            "src_smart": len(src_smart),
-            "src_priority": priority_count,
-            "unique": len(seen_tokens),
-            "cooldown": on_cd,
-            "to_fetch": min(len(sol_tokens), 80),
-            "cuts": dict(cuts),
-            "passed": len(candidates),
-        })
-        # Son 10'u tut
-        if len(self._scan_history) > 10:
-            self._scan_history = self._scan_history[-10:]
-
-        return candidates
+        return candidates, result
 
     def format_scan_stats(self) -> str:
-        """Son 5 taramanın source/cut/pass breakdown'unu döner."""
-        if not self._scan_history:
+        if not self._history:
             return "🔍 <b>Tarama istatistikleri</b>\nHenüz tarama yok."
-        recent = list(reversed(self._scan_history[-5:]))
+        recent = list(reversed(self._history[-5:]))
         lines = [f"🔍 <b>Son {len(recent)} tarama</b>"]
         for s in recent:
-            age_min = (time.time() - s["ts"]) / 60
-            cuts = s["cuts"]
+            age_min = (time.time() - s.ts) / 60
             lines.append(
                 f"\n<i>{age_min:.0f}dk önce</i>\n"
-                f"  Kaynak: profiles=<code>{s['src_profiles']}</code> "
-                f"boost=<code>{s['src_boosted']}</code> "
-                f"top=<code>{s['src_top']}</code> "
-                f"pump=<code>{s['src_pump']}</code> "
-                f"smart=<code>{s['src_smart']}</code> "
-                f"priority=<code>{s['src_priority']}</code>\n"
-                f"  Unique: <code>{s['unique']}</code>  "
-                f"cooldown: <code>{s['cooldown']}</code>  "
-                f"fetched: <code>{s['to_fetch']}</code>\n"
-                f"  Cuts: no_pairs=<code>{cuts.get('no_pairs', 0)}</code> "
-                f"parse=<code>{cuts.get('parse_fail', 0)}</code> "
-                f"sanity=<code>{cuts.get('sanity', 0)}</code> "
-                f"liq_dd=<code>{cuts.get('liq_drawdown', 0)}</code> "
-                f"profile=<code>{cuts.get('profile', 0)}</code> "
-                f"low_score=<code>{cuts.get('low_score', 0)}</code>\n"
-                f"  → <b>passed: {s['passed']}</b>"
+                f"  Kaynak: ds_profiles=<code>{s.src_ds_profiles}</code> "
+                f"boost=<code>{s.src_ds_boosted}</code> "
+                f"top=<code>{s.src_ds_top}</code> "
+                f"pump=<code>{s.src_pump}</code>\n"
+                f"  Unique: <code>{s.unique_mints}</code>  "
+                f"cooldown: <code>{s.on_cooldown}</code>  "
+                f"fetched: <code>{s.fetched}</code>\n"
+                f"  Cuts: no_pairs=<code>{s.no_pairs}</code> "
+                f"parse=<code>{s.parse_fail}</code> "
+                f"filter=<code>{s.filter_fail}</code>\n"
+                f"  → <b>passed: {s.passed}</b>"
             )
+            if s.sample_filter_reasons:
+                lines.append(
+                    f"  <i>Filter reasons: {', '.join(s.sample_filter_reasons[:3])}</i>"
+                )
         return "\n".join(lines)
