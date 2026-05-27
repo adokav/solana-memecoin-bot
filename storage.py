@@ -38,6 +38,8 @@ class AlertEvent:
     pair_address: str
     opportunity_score: int
     risk_score: int
+    exit_score: int = 0
+    mode: str = "UNKNOWN"
 
 
 @dataclass
@@ -96,10 +98,13 @@ class Store:
 
     def status_text(self) -> str:
         active = self.active_watches()
+        early = sum(1 for a in self.alerts if getattr(a, "mode", "") == "EARLY WATCH")
+        confirmed = sum(1 for a in self.alerts if getattr(a, "mode", "") == "CONFIRMED SIGNAL")
         lines = [
             "📡 <b>Alert-only bot durumu</b>",
             f"Aktif izleme: <code>{len(active)}</code>",
             f"Toplam alert: <code>{len(self.alerts)}</code>",
+            f"Early/Confirmed: <code>{early}/{confirmed}</code>",
             f"Otomatik alım: <b>kapalı</b>",
         ]
         for w in active[:10]:

@@ -1,4 +1,10 @@
-"""Telegram interface for manual memecoin alerts and watch warnings."""
+"""Telegram interface for manual memecoin alerts and watch warnings.
+
+Robust v3 notes:
+- Supports both scan_stats and scan_status aliases.
+- Supports command menu, reply-keyboard text and inline callback buttons.
+- Does not rely on exact button label; emoji labels are normalized.
+"""
 from __future__ import annotations
 
 import html
@@ -7,7 +13,7 @@ from typing import Awaitable, Callable
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters, ApplicationHandlerStop
 
 from candidate import Candidate
 from config import config
@@ -25,11 +31,12 @@ BOT_COMMANDS = [
     ("start", "Bot durumu ve komutlar"),
     ("status", "Aktif izleme listesi"),
     ("scan_stats", "Son tarama istatistikleri"),
+    ("scan_status", "Son tarama istatistikleri"),
     ("ignore", "Token izlemeyi bırak: /ignore <mint>"),
 ]
 
 PERSISTENT_KEYBOARD = ReplyKeyboardMarkup(
-    [["/status", "/scan_stats"], ["/stats"]],
+    [["/status", "/scan_stats"], ["status", "scan_stats"]],
     resize_keyboard=True,
     is_persistent=True,
 )
@@ -39,60 +46,114 @@ def _esc(value: object) -> str:
     return html.escape(str(value), quote=True)
 
 
+def _norm_button_text(value: str | None) -> str:
+    """Normalize command/reply/callback text coming from different Telegram clients."""
+    text = (value or "").strip().lower()
+    text = text.split("@", 1)[0]          # /status@BotName
+    text = text.lstrip("/")
+    # Keep letters, digits and underscores; remove emojis/spaces/punctuation.
+    compact = "".join(ch for ch in text if ch.isalnum() or ch == "_")
+    aliases = {
+        "scanstatus": "scan_stats",
+        "scan_status": "scan_stats",
+        "scanstats": "scan_stats",
+        "scan_stats": "scan_stats",
+        "stats": "scan_stats",
+        "status": "status",
+        "start": "start",
+    }
+    return aliases.get(compact, compact)
+
+
 class TelegramHub:
     def __init__(self, store: Store, close_handler: CloseHandler | None = None, buy_handler: BuyHandler | None = None) -> None:
         self.store = store
         self.close_handler = close_handler
         self.buy_handler = buy_handler
         self.app: Application = Application.builder().token(config.telegram_token).build()
-        self.app.add_handler(CommandHandler("start", self._start))
-        self.app.add_handler(CommandHandler("status", self._status))
-        self.app.add_handler(CommandHandler("scan_stats", self._scan_stats))
-        self.app.add_handler(CommandHandler("stats", self._scan_stats))
-        self.app.add_handler(CommandHandler("ignore", self._ignore))
-        # Telegram reply-keyboard buttons sometimes arrive as plain text without a command entity.
-        # This fallback makes /status and /scan_stats buttons reliable on mobile clients.
-        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._text_router))
-        self.app.add_handler(CallbackQueryHandler(self._callback))
-        self._chat_id = config.telegram_chat_id
 
+        # Universal text router MUST be first. Telegram reply-keyboard buttons can be sent
+        # as either plain text or slash commands; this catches both before command handlers.
+        self.app.add_handler(MessageHandler(filters.TEXT, self._universal_text_router), group=-10)
+
+        # Commands as fallback.
+        self.app.add_handler(CommandHandler("start", self._start), group=0)
+        self.app.add_handler(CommandHandler("status", self._status), group=0)
+        self.app.add_handler(CommandHandler(["scan_stats", "scan_status", "stats"], self._scan_stats), group=0)
+        self.app.add_handler(CommandHandler("ignore", self._ignore), group=0)
+
+        # Inline buttons.
+        self.app.add_handler(CallbackQueryHandler(self._callback), group=1)
+
+        self._chat_id = config.telegram_chat_id
         self.status_cb: Callable[[], Awaitable[str]] | None = None
         self.scan_stats_cb: Callable[[], Awaitable[str]] | None = None
         self.ignore_cb: Callable[[str], Awaitable[str]] | None = None
 
+    async def _universal_text_router(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle reply-keyboard texts and slash commands reliably.
 
-    async def _text_router(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        text = (update.message.text or "").strip().split()[0].lower()
-        if text in {"/status", "status"}:
+        This fixes Telegram clients where the persistent menu sends /scan_stats as a
+        command; normal MessageHandler routes used earlier ignored commands.
+        """
+        if not update.message or not update.message.text:
+            return
+
+        action = _norm_button_text(update.message.text)
+        if action == "status":
             await self._status(update, ctx)
-            return
-        if text in {"/scan_stats", "/stats", "scan_stats", "stats"}:
+            raise ApplicationHandlerStop
+        if action == "scan_stats":
             await self._scan_stats(update, ctx)
-            return
+            raise ApplicationHandlerStop
 
     async def _start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not update.message:
+            return
         await update.message.reply_text(
-            "🤖 Alert-only memecoin bot aktif.\n\n"
-            "Bot otomatik alım yapmaz; alım yalnızca çift onaylı butonla olur. Adayları filtreler, Telegram'a gönderir, "
-            "formasyon bozulursa uyarır. Cüzdan tanımlıysa kapatma butonu satış emri gönderebilir.",
+            "🤖 Memecoin radar bot aktif.\n\n"
+            "Bot adayları filtreler, radara girme nedenlerini gösterir ve formasyon bozulursa uyarır. "
+            "Alım/satım yalnızca Telegram'da çift onayla çalışır.",
             reply_markup=PERSISTENT_KEYBOARD,
+        )
+        await update.message.reply_text(
+            "Hızlı menü:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📊 Scan Stats", callback_data="scan_stats"),
+                InlineKeyboardButton("📌 Status", callback_data="status"),
+            ]]),
         )
 
     async def _reply(self, update: Update, text: str) -> None:
         if update.message:
-            await update.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=PERSISTENT_KEYBOARD)
-        elif update.callback_query and update.callback_query.message:
-            await update.callback_query.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=PERSISTENT_KEYBOARD)
+            await update.message.reply_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=PERSISTENT_KEYBOARD,
+            )
+            return
+        if update.callback_query and update.callback_query.message:
+            await update.callback_query.message.reply_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=PERSISTENT_KEYBOARD,
+            )
 
     async def _status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        text = await self.status_cb() if self.status_cb else self.store.status_text()
+        try:
+            text = await self.status_cb() if self.status_cb else self.store.status_text()
+        except Exception as e:
+            log.exception("status failed")
+            text = f"⚠️ Status okunamadı: <code>{_esc(e)}</code>"
         await self._reply(update, text)
 
     async def _scan_stats(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         try:
-            text = await self.scan_stats_cb() if self.scan_stats_cb else "Henüz tarama yok."
+            text = await self.scan_stats_cb() if self.scan_stats_cb else "🔍 <b>Tarama istatistikleri</b>\nHenüz tarama yok."
         except Exception as e:
-            log.exception("scan_stats command failed")
+            log.exception("scan_stats failed")
             text = f"⚠️ Tarama istatistiği okunamadı: <code>{_esc(e)}</code>"
         await self._reply(update, text)
 
@@ -106,85 +167,100 @@ class TelegramHub:
 
     async def _callback(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
-        await query.answer()
+        if not query:
+            return
+        try:
+            await query.answer()
+        except Exception:
+            log.exception("callback answer failed")
+
         data = query.data or ""
         action, _, token = data.partition(":")
-        # Compatibility: old inline buttons may send scan_stats/stats/status as callback_data.
-        if action in {"scan_stats", "stats"}:
+        normalized_action = _norm_button_text(action)
+
+        if normalized_action == "scan_stats":
             try:
-                text = await self.scan_stats_cb() if self.scan_stats_cb else "Henüz tarama yok."
+                text = await self.scan_stats_cb() if self.scan_stats_cb else "🔍 <b>Tarama istatistikleri</b>\nHenüz tarama yok."
             except Exception as e:
                 log.exception("scan_stats callback failed")
                 text = f"⚠️ Tarama istatistiği okunamadı: <code>{_esc(e)}</code>"
-            await query.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=PERSISTENT_KEYBOARD)
+            if query.message:
+                await query.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=PERSISTENT_KEYBOARD)
             return
 
-        if action == "status":
-            text = await self.status_cb() if self.status_cb else self.store.status_text()
-            await query.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=PERSISTENT_KEYBOARD)
+        if normalized_action == "status":
+            try:
+                text = await self.status_cb() if self.status_cb else self.store.status_text()
+            except Exception as e:
+                log.exception("status callback failed")
+                text = f"⚠️ Status okunamadı: <code>{_esc(e)}</code>"
+            if query.message:
+                await query.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=PERSISTENT_KEYBOARD)
             return
 
         if action == "ignore":
             text = await self.ignore_cb(token) if self.ignore_cb else "Ignore callback hazır değil."
-            await query.edit_message_reply_markup(reply_markup=None)
-            await query.message.reply_text(text, parse_mode=ParseMode.HTML)
+            if query.message:
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.message.reply_text(text, parse_mode=ParseMode.HTML)
             return
 
         if action == "buy":
-            await query.message.reply_text(
-                (
-                    f"⚠️ <code>{_esc(token)}</code> için <b>{config.buy_amount_sol:.4f} SOL</b> alım emri hazırlanacak.\n\n"
-                    "Bu işlem gerçek para kullanır. Onaylıyor musun?"
-                ),
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("✅ ONAYLA VE AL", callback_data=f"confirm_buy:{token}"),
-                    InlineKeyboardButton("❌ İPTAL", callback_data=f"cancel:{token}"),
-                ]]),
-            )
+            if query.message:
+                await query.message.reply_text(
+                    (
+                        f"⚠️ <code>{_esc(token)}</code> için <b>{config.buy_amount_sol:.4f} SOL</b> alım emri hazırlanacak.\n\n"
+                        "Bu işlem gerçek para kullanır. Onaylıyor musun?"
+                    ),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✅ ONAYLA VE AL", callback_data=f"confirm_buy:{token}"),
+                        InlineKeyboardButton("❌ İPTAL", callback_data=f"cancel:{token}"),
+                    ]]),
+                )
             return
 
         if action == "confirm_buy":
+            if not query.message:
+                return
             if not self.buy_handler:
-                await query.message.reply_text(
-                    "⚠️ Alım pasif: WALLET_PRIVATE_KEY tanımlı değil veya bot alım yetkisine sahip değil.",
-                    parse_mode=ParseMode.HTML,
-                )
+                await query.message.reply_text("⚠️ Alım pasif: WALLET_PRIVATE_KEY tanımlı değil.", parse_mode=ParseMode.HTML)
                 return
             ok, msg = await self.buy_handler(token)
-            prefix = "✅" if ok else "❌"
-            await query.message.reply_text(f"{prefix} {msg}", parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            await query.message.reply_text(("✅ " if ok else "❌ ") + msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
             return
 
         if action == "close":
-            await query.message.reply_text(
-                (
-                    f"⚠️ <code>{_esc(token)}</code> için cüzdandaki tüm bakiye satılacak.\n\n"
-                    "Onaylıyor musun?"
-                ),
-                parse_mode=ParseMode.HTML,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("✅ ONAYLA VE SAT", callback_data=f"confirm_close:{token}"),
-                    InlineKeyboardButton("❌ İPTAL", callback_data=f"cancel:{token}"),
-                ]]),
-            )
+            if query.message:
+                await query.message.reply_text(
+                    (
+                        f"⚠️ <code>{_esc(token)}</code> için cüzdandaki tüm bakiye satılacak.\n\n"
+                        "Onaylıyor musun?"
+                    ),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✅ ONAYLA VE SAT", callback_data=f"confirm_close:{token}"),
+                        InlineKeyboardButton("❌ İPTAL", callback_data=f"cancel:{token}"),
+                    ]]),
+                )
             return
 
         if action == "confirm_close":
+            if not query.message:
+                return
             if not self.close_handler:
-                await query.message.reply_text(
-                    "⚠️ Hızlı kapatma pasif: WALLET_PRIVATE_KEY tanımlı değil veya bot satış yetkisine sahip değil.",
-                    parse_mode=ParseMode.HTML,
-                )
+                await query.message.reply_text("⚠️ Hızlı kapatma pasif: WALLET_PRIVATE_KEY tanımlı değil.", parse_mode=ParseMode.HTML)
                 return
             ok, msg = await self.close_handler(token)
-            prefix = "✅" if ok else "❌"
-            await query.message.reply_text(f"{prefix} {msg}", parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            await query.message.reply_text(("✅ " if ok else "❌ ") + msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
             return
 
-        if action == "cancel":
+        if action == "cancel" and query.message:
             await query.message.reply_text("İşlem iptal edildi.")
             return
+
+        if query.message:
+            await query.message.reply_text(f"⚠️ Bilinmeyen buton: <code>{_esc(data)}</code>", parse_mode=ParseMode.HTML)
 
     async def send_opportunity(self, c: Candidate, op: Opportunity) -> None:
         reasons = "\n".join(f"• {_esc(x)}" for x in op.reasons) or "• Radar eşiğini geçti"
@@ -192,6 +268,7 @@ class TelegramHub:
         mode = getattr(op, "mode", "CONFIRMED SIGNAL")
         emoji = "🟡" if mode == "EARLY WATCH" else "🟢"
         title = "EARLY WATCH" if mode == "EARLY WATCH" else "ALIM ADAYI"
+
         text = (
             f"{emoji} <b>{title}: ${_esc(c.base_symbol)}</b>\n\n"
             f"Opportunity: <code>{op.opportunity_score}/100</code>\n"
@@ -207,6 +284,10 @@ class TelegramHub:
         )
         buttons = [
             [InlineKeyboardButton(f"🚀 AL {config.buy_amount_sol:.3f} SOL", callback_data=f"buy:{c.base_token}")],
+            [
+                InlineKeyboardButton("👁 İzlemede", callback_data="status"),
+                InlineKeyboardButton("📊 Scan Stats", callback_data="scan_stats"),
+            ],
             [InlineKeyboardButton("DexScreener", url=c.url or f"https://dexscreener.com/solana/{c.pair_address}")],
             [
                 InlineKeyboardButton("Solscan", url=f"https://solscan.io/token/{c.base_token}"),
@@ -227,6 +308,8 @@ class TelegramHub:
             pair_address=c.pair_address,
             opportunity_score=op.opportunity_score,
             risk_score=op.risk_score,
+            exit_score=getattr(op, "exit_score", 0),
+            mode=getattr(op, "mode", "UNKNOWN"),
         ))
 
     async def send_watch_warning(self, w: WatchWarning) -> None:
@@ -242,9 +325,10 @@ class TelegramHub:
         buttons = [
             [InlineKeyboardButton("🚨 Pozisyonu Kapat", callback_data=f"close:{w.token_mint}")],
             [
+                InlineKeyboardButton("📊 Scan Stats", callback_data="scan_stats"),
                 InlineKeyboardButton("DexScreener", url=w.url or f"https://dexscreener.com/solana/{w.pair_address}"),
-                InlineKeyboardButton("🚫 Yoksay", callback_data=f"ignore:{w.token_mint}"),
             ],
+            [InlineKeyboardButton("🚫 Yoksay", callback_data=f"ignore:{w.token_mint}")],
         ]
         await self.app.bot.send_message(
             chat_id=self._chat_id,
@@ -272,34 +356,13 @@ class TelegramHub:
             await self.app.bot.set_my_commands([BotCommand(c, d) for c, d in BOT_COMMANDS])
         except Exception:
             log.exception("set_my_commands failed")
+        if self.app.updater is None:
+            raise RuntimeError("Telegram polling updater is not available. Check python-telegram-bot installation.")
         await self.app.updater.start_polling(drop_pending_updates=True)
         log.info("telegram started")
 
     async def stop(self) -> None:
-        await self.app.updater.stop()
+        if self.app.updater is not None:
+            await self.app.updater.stop()
         await self.app.stop()
         await self.app.shutdown()
-
-
-# ---- radar formatter patch ----
-def format_radar_message(symbol, radar):
-    emoji = "🟡" if radar.mode == "EARLY WATCH" else "🟢"
-    lines = [
-        f"{emoji} {radar.mode}: ${symbol}",
-        "",
-        f"Opportunity: {radar.opportunity}/100",
-        f"Safety: {radar.safety}/100",
-        f"Exit: {radar.exit_score}/100",
-        "",
-        "Neden radara girdi:"
-    ]
-    for r in radar.reasons:
-        lines.append(f"✅ {r}")
-
-    if radar.risks:
-        lines.append("")
-        lines.append("Riskler:")
-        for r in radar.risks:
-            lines.append(f"⚠️ {r}")
-
-    return "\n".join(lines)
