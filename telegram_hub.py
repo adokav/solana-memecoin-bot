@@ -169,14 +169,18 @@ class TelegramHub:
             return
 
     async def send_opportunity(self, c: Candidate, op: Opportunity) -> None:
-        reasons = "\n".join(f"• {_esc(x)}" for x in op.reasons)
-        cautions = "\n".join(f"• {_esc(x)}" for x in op.cautions)
+        reasons = "\n".join(f"• {_esc(x)}" for x in op.reasons) or "• Radar eşiğini geçti"
+        cautions = "\n".join(f"• {_esc(x)}" for x in op.cautions) or "• Memecoin riski yüksek; manuel onay şart"
+        mode = getattr(op, "mode", "CONFIRMED SIGNAL")
+        emoji = "🟡" if mode == "EARLY WATCH" else "🟢"
+        title = "EARLY WATCH" if mode == "EARLY WATCH" else "ALIM ADAYI"
         text = (
-            f"🟢 <b>ALIM ADAYI: ${_esc(c.base_symbol)}</b>\n\n"
-            f"Fırsat: <code>{op.opportunity_score}/100</code>\n"
-            f"Risk: <code>{op.risk_score}/100</code>\n\n"
-            f"<b>Neden geçti</b>\n{reasons}\n\n"
-            f"<b>Dikkat</b>\n{cautions}\n\n"
+            f"{emoji} <b>{title}: ${_esc(c.base_symbol)}</b>\n\n"
+            f"Opportunity: <code>{op.opportunity_score}/100</code>\n"
+            f"Risk: <code>{op.risk_score}/100</code>\n"
+            f"Exit: <code>{getattr(op, 'exit_score', 0)}/100</code>\n\n"
+            f"<b>Radara girme nedenleri</b>\n{reasons}\n\n"
+            f"<b>Risk notları</b>\n{cautions}\n\n"
             f"Likidite: <code>${c.liquidity_usd:,.0f}</code>\n"
             f"Hacim/Liq h1: <code>{(c.volume_h1 / max(c.liquidity_usd, 1)):.2f}</code>\n"
             f"Tx h1: <code>{c.txns_h1}</code> | Buy: <code>{(c.buys_h1 / max(c.txns_h1, 1)):.0%}</code>\n"

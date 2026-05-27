@@ -66,6 +66,14 @@ class Config:
     max_liq_usd: float = field(default_factory=lambda: _float("MAX_LIQ_USD", 350_000))
     min_age_h: float = field(default_factory=lambda: _float("MIN_AGE_H", 0.08))      # ~5 dk
     max_age_h: float = field(default_factory=lambda: _float("MAX_AGE_H", 48))        # 2 gün
+    # Radar V2: early-watch alt eşikleri. Bu eşikler erken fırsatı kaçırmamak için kullanılır;
+    # güçlü sinyal ayrımı opportunity.py içinde yapılır.
+    early_min_liq_usd: float = field(default_factory=lambda: _float("EARLY_MIN_LIQ_USD", 2_000))
+    early_min_age_h: float = field(default_factory=lambda: _float("EARLY_MIN_AGE_H", 0.03))  # ~2 dk
+    early_min_txns_h1: int = field(default_factory=lambda: _int("EARLY_MIN_TXNS_H1", 10))
+    early_min_volume_h1_usd: float = field(default_factory=lambda: _float("EARLY_MIN_VOLUME_H1_USD", 500))
+    early_min_sells_h1: int = field(default_factory=lambda: _int("EARLY_MIN_SELLS_H1", 1))
+    early_min_volume_liq_ratio: float = field(default_factory=lambda: _float("EARLY_MIN_VOLUME_LIQ_RATIO", 0.05))
     min_txns_h1: int = field(default_factory=lambda: _int("MIN_TXNS_H1", 35))
     min_volume_h1_usd: float = field(default_factory=lambda: _float("MIN_VOLUME_H1_USD", 4_000))
     min_volume_liq_ratio: float = field(default_factory=lambda: _float("MIN_VOLUME_LIQ_RATIO", 0.20))
