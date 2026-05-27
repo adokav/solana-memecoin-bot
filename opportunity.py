@@ -1,100 +1,71 @@
-"""Opportunity and risk scoring for Telegram alerts.
-
-The score is not a buy signal. It is a compact way to rank manually reviewed
-memecoins after hard scam/rug filters have passed.
-"""
-from __future__ import annotations
 
 from dataclasses import dataclass
 
-from candidate import Candidate
-from filter import buy_ratio, volume_liquidity_ratio
-
-
 @dataclass
-class Opportunity:
-    opportunity_score: int
-    risk_score: int
-    reasons: list[str]
-    cautions: list[str]
-    safety: str
+class RadarResult:
+    mode: str
+    opportunity: int
+    safety: int
+    exit_score: int
+    reasons: list
+    risks: list
 
+def classify_candidate(c):
+    liq = getattr(c, "liq_usd", 0)
+    tx = getattr(c, "txns_h1", 0)
+    buy_ratio = getattr(c, "buy_ratio", 0)
+    vol_ratio = getattr(c, "volume_liq_ratio", 0)
+    h1 = getattr(c, "h1", 0)
+    h6 = getattr(c, "h6", 0)
 
-def _clamp(value: float, lo: float = 0, hi: float = 100) -> int:
-    return int(max(lo, min(hi, round(value))))
+    opportunity = 50
+    safety = 50
+    exit_score = 50
+    reasons = []
+    risks = []
 
+    if liq > 5000:
+        opportunity += 10
+        safety += 8
+        reasons.append(f"Likidite güçlü: ${liq:,.0f}")
 
-def score(c: Candidate, safety_reason: str = "ok") -> Opportunity:
-    br = buy_ratio(c)
-    vlr = volume_liquidity_ratio(c)
+    if tx > 30:
+        opportunity += 10
+        reasons.append(f"İşlem yoğunluğu yüksek: {tx}/h")
 
-    opportunity = 35.0
-    reasons: list[str] = []
-    cautions: list[str] = []
+    if 52 <= buy_ratio <= 78:
+        opportunity += 10
+        safety += 5
+        reasons.append(f"Buy pressure sağlıklı: %{buy_ratio}")
 
-    if c.liquidity_usd >= 20_000:
-        opportunity += 12
-        reasons.append("Likidite giriş/çıkış için daha sağlıklı")
-    elif c.liquidity_usd >= 8_000:
-        opportunity += 7
-        reasons.append("Likidite minimum eşiğin üstünde")
-    else:
-        cautions.append("Likidite hâlâ ince; çıkış kayabilir")
-
-    if 0.55 <= br <= 0.75:
-        opportunity += 18
-        reasons.append("Alıcı/satıcı dengesi doğal görünüyor")
-    elif br > 0.75:
+    if vol_ratio > 1.2:
         opportunity += 8
-        cautions.append("Alım baskısı çok tek taraflı; fake pump olabilir")
-    else:
-        opportunity += 4
+        reasons.append(f"Hacim/Likidite aktif: {vol_ratio:.2f}x")
 
-    if 0.7 <= vlr <= 5:
-        opportunity += 18
-        reasons.append("Hacim/likidite oranı canlı ama aşırı değil")
-    elif 0.3 <= vlr < 0.7:
+    if 10 <= h1 <= 180:
         opportunity += 8
-        reasons.append("Hacim/likidite oranı kabul edilebilir")
-    else:
-        opportunity += 4
-        cautions.append("Hacim/likidite oranı gürültülü olabilir")
+        reasons.append(f"h1 momentum uygun: %{h1}")
 
-    if 5 <= c.price_change_h1 <= 120:
-        opportunity += 12
-        reasons.append("Momentum var, aşırı uzamamış")
-    elif c.price_change_h1 > 120:
-        opportunity += 4
-        cautions.append("H1 pump yüksek; FOMO riski var")
-    elif c.price_change_h1 >= -5:
-        opportunity += 6
-        reasons.append("Fiyat h1 bazında stabil")
+    if h6 > 400:
+        safety -= 15
+        risks.append("h6 aşırı şişmiş")
 
-    if 0.25 <= c.pair_age_h <= 24:
-        opportunity += 5
-        reasons.append("Fresh ama ilk dakikaların kaosu geçmiş")
+    if buy_ratio > 90:
+        safety -= 20
+        risks.append("Buy ratio aşırı yüksek")
 
-    risk = 20.0
-    if c.liquidity_usd < 10_000:
-        risk += 18
-    if c.txns_h1 < 50:
-        risk += 12
-    if br > 0.85:
-        risk += 15
-    if c.price_change_h1 > 150:
-        risk += 18
-    if c.price_change_h6 < -20:
-        risk += 12
-    if vlr > 8:
-        risk += 12
+    if liq < 3000:
+        risks.append("Likidite düşük")
 
-    if not cautions:
-        cautions.append("Memecoin riski devam eder; manuel onay şart")
+    mode = "CONFIRMED SIGNAL"
+    if liq < 5000 or tx < 30:
+        mode = "EARLY WATCH"
 
-    return Opportunity(
-        opportunity_score=_clamp(opportunity),
-        risk_score=_clamp(risk),
-        reasons=reasons[:5] or ["Hard filtreler ve safety kontrolleri geçti"],
-        cautions=cautions[:4],
-        safety=safety_reason,
+    return RadarResult(
+        mode=mode,
+        opportunity=min(max(opportunity,0),100),
+        safety=min(max(safety,0),100),
+        exit_score=min(max(exit_score,0),100),
+        reasons=reasons,
+        risks=risks
     )

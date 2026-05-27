@@ -257,3 +257,27 @@ class TelegramHub:
         await self.app.updater.stop()
         await self.app.stop()
         await self.app.shutdown()
+
+
+# ---- radar formatter patch ----
+def format_radar_message(symbol, radar):
+    emoji = "🟡" if radar.mode == "EARLY WATCH" else "🟢"
+    lines = [
+        f"{emoji} {radar.mode}: ${symbol}",
+        "",
+        f"Opportunity: {radar.opportunity}/100",
+        f"Safety: {radar.safety}/100",
+        f"Exit: {radar.exit_score}/100",
+        "",
+        "Neden radara girdi:"
+    ]
+    for r in radar.reasons:
+        lines.append(f"✅ {r}")
+
+    if radar.risks:
+        lines.append("")
+        lines.append("Riskler:")
+        for r in radar.risks:
+            lines.append(f"⚠️ {r}")
+
+    return "\n".join(lines)
