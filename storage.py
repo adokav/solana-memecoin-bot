@@ -1,7 +1,11 @@
-"""Pozisyon storage. Render Disk ile kalıcı (DATA_DIR=/data)."""
+"""Position storage. JSON disk persist.
+
+Lean: sadece gerekli alanlar. Eski JSON dosyalarındaki extra field'lar
+forward-compat ile sessizce ignore edilir.
+"""
 import json
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Optional
 
@@ -14,7 +18,7 @@ DB_PATH = config.data_dir / "positions.json"
 
 @dataclass
 class TpHit:
-    level: int           # 1, 2, 3
+    level: int
     trigger_pct: float
     sold_pct: float
     sold_amount_raw: int
@@ -25,7 +29,7 @@ class TpHit:
 
 @dataclass
 class PyramidAdd:
-    pct_at_add: float    # orijinal entry'e göre fiyat değişim % (add anında)
+    pct_at_add: float
     price_usd: float
     amount_raw: int
     sol_spent: float
@@ -38,46 +42,28 @@ class Position:
     pair_address: str
     base_token: str
     symbol: str
-    entry_price_usd: float           # blended ortalama (add'lerden sonra güncellenir)
+    entry_price_usd: float           # add'lerden sonra blended
     peak_price_usd: float
-    amount_raw: int          # alımda alınan toplam token (raw) — add ile artar
-    remaining_raw: int       # kademeli satışlardan sonra kalan
-    sol_spent: float         # toplam harcanan SOL (add'ler dahil)
-    sol_received_total: float = 0.0  # şu ana kadar kapatılan kısmın geliri
+    amount_raw: int                  # alımda alınan toplam (add ile artar)
+    remaining_raw: int               # partial sell'lerden sonra kalan
+    sol_spent: float                 # toplam harcanan (add dahil)
+    sol_received_total: float = 0.0
     opened_at: float = 0.0
     tx_open: str = ""
-    profile: str = "early"
-    score: float = 0.0
     tp_hits: list[TpHit] = field(default_factory=list)
-    breakeven_armed: bool = False  # TP1 sonrası SL breakeven'a çekildi mi
-    status: str = "open"     # open | closed
+    breakeven_armed: bool = False    # TP1 sonrası SL → 0%
+    status: str = "open"             # open | closed
     closed_at: Optional[float] = None
     pnl_pct: Optional[float] = None
     close_reason: Optional[str] = None
-    # Pyramid / DCA — opsiyonel, eski pozisyonlarda yok
-    original_entry_price_usd: Optional[float] = None  # add tetiği için referans
+    # Pyramid (anti-martingale)
+    original_entry_price_usd: Optional[float] = None  # pyramid trigger için referans
     pyramid_adds: list[PyramidAdd] = field(default_factory=list)
-    # Smart wallet exit signal'i 1 cüzdandan geldiğinde trailing daraltılır
-    trailing_stop_override_pct: Optional[float] = None
-    # Hold-time KATMAN 2 re-check için entry snapshot
+    # Hold-time safety: entry'deki likidite snapshot (drain check için)
     entry_liquidity_usd: Optional[float] = None
-    entry_top10_pct: Optional[float] = None
-    last_safety_check_ts: float = 0.0
-    # Pump.fun bonding curve pozisyonu — farklı price feed + farklı sell yolu
-    is_pump_pos: bool = False
-    # Sizing bandit hangi multiplier seçti — kapanışta arm güncelleme için
-    sizing_multiplier: Optional[float] = None
-    # Pozisyonun hangi cüzdandan açıldığı — multi-wallet rotation için
-    wallet_pubkey: Optional[str] = None
-    # Entry anındaki top N holder snapshot — insider exit detection için
-    # [{address, amount, ui_amount}, ...]
-    entry_holders: list[dict] = field(default_factory=list)
-    # Token creator adresi — correlation manager için
-    creator: Optional[str] = None
-    # Honeypot sim'den gelen price impact tahmini — ML feature
-    entry_price_impact_pct: Optional[float] = None
-    # Sector etiketi (keyword tabanlı) — portföy çeşitlendirme için
-    sector: Optional[str] = None
+
+
+_KNOWN_FIELDS = {f.name for f in fields(Position)}
 
 
 @dataclass
@@ -92,10 +78,14 @@ class Store:
             data = json.loads(DB_PATH.read_text())
             positions = []
             for p in data.get("positions", []):
-                tp_hits = [TpHit(**h) for h in p.pop("tp_hits", [])]
-                pyramid_adds = [PyramidAdd(**a) for a in p.pop("pyramid_adds", [])]
+                # Forward-compat: eski JSON'larda olabilecek extra field'ları ignore et
+                tp_hits_raw = p.pop("tp_hits", [])
+                pyr_raw = p.pop("pyramid_adds", [])
+                p_filtered = {k: v for k, v in p.items() if k in _KNOWN_FIELDS}
+                tp_hits = [TpHit(**h) for h in tp_hits_raw]
+                pyramid_adds = [PyramidAdd(**a) for a in pyr_raw]
                 positions.append(Position(
-                    tp_hits=tp_hits, pyramid_adds=pyramid_adds, **p,
+                    tp_hits=tp_hits, pyramid_adds=pyramid_adds, **p_filtered,
                 ))
             return cls(positions=positions)
         except (json.JSONDecodeError, TypeError, KeyError) as e:

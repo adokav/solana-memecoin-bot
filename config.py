@@ -1,19 +1,20 @@
-"""Ortam değişkenlerini yükler.
+"""Tüm parametreler tek dosyada. Sade.
 
-Render'daki mevcut isimler:
-  TOKEN              -> Telegram bot token
-  CHAT_ID            -> Telegram chat ID
-Bunları kod içinde standart isimlerle eşliyoruz.
+Matematik temelli grup'lar:
+  - Risk caps (asimetrik risk yönetimi)
+  - 5 hard filter gate (EV>0 hipotezi)
+  - Çıkış stratejisi (TP1 dinamik + trailing + SL + pyramid)
 """
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
 
-def _str(name: str, default: str | None = None, required: bool = False) -> str:
+def _str(name: str, default: str = "", required: bool = False) -> str:
     val = os.getenv(name, default)
     if required and not val:
         raise RuntimeError(f"Missing required env var: {name}")
@@ -41,11 +42,11 @@ def _bool(name: str, default: bool) -> bool:
 
 @dataclass
 class Config:
-    # --- Telegram (Render isimleri: TOKEN, CHAT_ID) ---
+    # === Telegram ===
     telegram_token: str = field(default_factory=lambda: _str("TOKEN", required=True))
     telegram_chat_id: int = field(default_factory=lambda: _int("CHAT_ID", 0))
 
-    # --- Solana ---
+    # === Solana RPC + cüzdan ===
     rpc_url: str = field(default_factory=lambda: _str(
         "SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com"
     ))
@@ -54,363 +55,78 @@ class Config:
     ))
     helius_api_key: str = field(default_factory=lambda: _str("HELIUS_API_KEY", ""))
 
-    # --- Veri kalıcılığı ---
+    # === Veri kalıcılığı ===
     data_dir: Path = field(default_factory=lambda: Path(_str("DATA_DIR", "./data")))
 
-    # --- İşlem ---
-
-    # --- Portföy risk limitleri ---
-    max_open_positions: int = field(default_factory=lambda: _int("MAX_OPEN_POSITIONS", 3))
-    max_total_exposure_sol: float = field(default_factory=lambda: _float("MAX_TOTAL_EXPOSURE_SOL", 0.03))
-
+    # === Position sizing (Kelly-conservative) ===
+    # Kelly ~%1-2 sermaye. Küçük başla, EV doğrulandıkça büyüt.
     buy_amount_sol: float = field(default_factory=lambda: _float("BUY_AMOUNT_SOL", 0.01))
-    slippage_bps: int = field(default_factory=lambda: _int("SLIPPAGE_BPS", 300))
+    max_open_positions: int = field(default_factory=lambda: _int("MAX_OPEN_POSITIONS", 3))
+    max_total_exposure_sol: float = field(default_factory=lambda: _float("MAX_TOTAL_EXPOSURE_SOL", 0.05))
 
-    # --- Yürütme kalitesi ---
-    # Alımda hız > slippage, satışta tam tersine ihtiyaç var
-    buy_slippage_bps: int = field(default_factory=lambda: _int("BUY_SLIPPAGE_BPS", 500))
-    sell_slippage_bps: int = field(default_factory=lambda: _int("SELL_SLIPPAGE_BPS", 700))
-    # dynamicSlippage: Jupiter quote'a göre slippage'ı kendi adapte eder (max cap altında)
-    dynamic_slippage_enabled: bool = field(default_factory=lambda: _bool("DYNAMIC_SLIPPAGE", True))
-    dynamic_slippage_max_bps: int = field(default_factory=lambda: _int("DYNAMIC_SLIPPAGE_MAX_BPS", 1500))
-    # Priority fee: memecoin sniper'da yarışı kazanmak için yüksek seviye lazım
-    # priorityLevel: "medium" | "high" | "veryHigh"
-    priority_fee_level: str = field(default_factory=lambda: _str("PRIORITY_FEE_LEVEL", "veryHigh"))
-    # Üst sınır: 0.005 SOL ~ $1 civarı, sniper için makul tavan
-    max_priority_fee_lamports: int = field(default_factory=lambda: _int("MAX_PRIORITY_FEE_LAMPORTS", 5_000_000))
-
-    # Jito bundle (priority fee yarışını bypass): default kapalı, opt-in
-    jito_enabled: bool = field(default_factory=lambda: _bool("JITO_ENABLED", False))
-    jito_block_engine_url: str = field(default_factory=lambda: _str(
-        "JITO_BLOCK_ENGINE_URL", "https://mainnet.block-engine.jito.wtf"
-    ))
-    # 100k lamports ~ $0.02; memecoin yarışında 100k-1M arası tipiktir
-    jito_tip_lamports: int = field(default_factory=lambda: _int("JITO_TIP_LAMPORTS", 100_000))
-
-    # --- Kademeli çıkış (matematik-olasılık: principal recovery + moon bag) ---
-    # TP1: anapara kurtarma noktası. Default +%50.
-    tp1_trigger: float = field(default_factory=lambda: _float("TP1_TRIGGER_PCT", 50))
-    # tp1_sell static fallback — DYNAMIC_PRINCIPAL_RECOVERY açıksa override
-    tp1_sell: float = field(default_factory=lambda: _float("TP1_SELL_PCT", 70))
-    # Dinamik anapara kurtarma: sell_pct = 1/(1 + trigger/100) × 1.05 (5% buffer)
-    # Bu sayede TP1'de kasaya orijinal SOL + küçük tampon geri döner.
-    # TP1_TRIGGER ne olursa olsun matematiksel olarak anapara kurtarılır.
-    tp1_dynamic_principal_recovery: bool = field(
-        default_factory=lambda: _bool("TP1_DYNAMIC_PRINCIPAL_RECOVERY", True),
-    )
-    # TP2: büyük profit lock
-    tp2_trigger: float = field(default_factory=lambda: _float("TP2_TRIGGER_PCT", 200))
-    tp2_sell: float = field(default_factory=lambda: _float("TP2_SELL_PCT", 50))
-    # TP3: moon bag küçültme
-    tp3_trigger: float = field(default_factory=lambda: _float("TP3_TRIGGER_PCT", 500))
-    tp3_sell: float = field(default_factory=lambda: _float("TP3_SELL_PCT", 50))
-    stop_loss: float = field(default_factory=lambda: _float("STOP_LOSS_PCT", 35))
-    trailing_stop: float = field(default_factory=lambda: _float("TRAILING_STOP_PCT", 25))
-    breakeven_after_tp1: bool = field(default_factory=lambda: _bool("BREAKEVEN_AFTER_TP1", True))
-
-    # --- KATMAN 1: Erken giriş ---
-    # BASIT KURAL: fresh + canlı aktivite + alıcı çoğunluk. Aşırı sıkı değil.
-    early_min_liq: float = field(default_factory=lambda: _float("EARLY_MIN_LIQUIDITY", 3000))
-    early_max_liq: float = field(default_factory=lambda: _float("EARLY_MAX_LIQUIDITY", 300000))
-    early_min_age_h: float = field(default_factory=lambda: _float("EARLY_MIN_AGE_H", 0.5))
-    early_max_age_h: float = field(default_factory=lambda: _float("EARLY_MAX_AGE_H", 24))
-    early_min_vol_h1_ratio: float = field(default_factory=lambda: _float("EARLY_MIN_VOL_H1_RATIO", 0.3))
-    early_min_price_h1: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_H1", 5))
-    early_min_price_m5: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_M5", -5))
-    early_min_txns_h1: int = field(default_factory=lambda: _int("EARLY_MIN_TXNS_H1", 15))
-    early_min_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MIN_BUY_RATIO", 0.50))
-    # Wash trading tipik 0.85-0.93 aralığında çalışır; üst sınırı oraya bastır
-    early_max_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MAX_BUY_RATIO", 0.88))
-
-    # Ortalama işlem boyutu (wash trading / micro-spam filtresi)
-    # Memecoin fresh launch'larda alımlar çok küçük olur ($0.50-$2);
-    # whale gelirse $1000+ olabilir. Geniş tut.
-    min_avg_tx_size_usd: float = field(default_factory=lambda: _float("MIN_AVG_TX_SIZE_USD", 1))
-    max_avg_tx_size_usd: float = field(default_factory=lambda: _float("MAX_AVG_TX_SIZE_USD", 5000))
-    avg_tx_min_txns: int = field(default_factory=lambda: _int("AVG_TX_MIN_TXNS", 50))
-
-    # --- KATMAN 1: Trend takip ---
-    trend_min_liq: float = field(default_factory=lambda: _float("TREND_MIN_LIQUIDITY", 50000))
-    trend_min_age_h: float = field(default_factory=lambda: _float("TREND_MIN_AGE_H", 24))
-    trend_max_age_h: float = field(default_factory=lambda: _float("TREND_MAX_AGE_H", 168))
-    trend_min_vol_h6: float = field(default_factory=lambda: _float("TREND_MIN_VOL_H6", 100000))
-    trend_min_price_h6: float = field(default_factory=lambda: _float("TREND_MIN_PRICE_H6", 25))
-    trend_min_price_h24: float = field(default_factory=lambda: _float("TREND_MIN_PRICE_H24", 50))
-    trend_min_txns_h1: int = field(default_factory=lambda: _int("TREND_MIN_TXNS_H1", 150))
-
-    # Multi-timeframe momentum confirmation
-    # EARLY: h6 fiyat değişimi bu eşikten düşükse "toparlanma" şüphesi → ele
-    early_min_price_h6: float = field(default_factory=lambda: _float("EARLY_MIN_PRICE_H6", -50))
-    # TREND: h1 fiyat değişimi bu eşikten düşükse "trend tükendi" → ele
-    # Memecoin'ler dakika dakika dalgalı; -10 daha gerçekçi
-    trend_min_price_h1: float = field(default_factory=lambda: _float("TREND_MIN_PRICE_H1", -10))
-
-    # Likidite stabilitesi (in-memory snapshot tracking)
-    # Memecoin havuzları %20 dalgalanma normal, %40 daha sağlam sinyal
-    max_liq_drawdown_pct: float = field(default_factory=lambda: _float("MAX_LIQ_DRAWDOWN_PCT", 40))
-    liq_history_window_min: int = field(default_factory=lambda: _int("LIQ_HISTORY_WINDOW_MIN", 120))
-    liq_history_min_age_min: int = field(default_factory=lambda: _int("LIQ_HISTORY_MIN_AGE_MIN", 20))
-
-    # --- KATMAN 2: Anti-rug (BASIT) ---
-    # Sadece gerçek rug riskini önleyen 3 ana kontrol:
-    #   1) mint authority revoked → infinite mint olmasın
-    #   2) freeze authority revoked → cüzdan dondurulmasın
-    #   3) honeypot sim → satılabilirlik testi (jupiter.py'de)
-    # LP lock + holder count gibi şartlar erken aşama coin'lerde mevcut değil
-    # ama gerçek rug indikatörü değiller; opt-in bıraktım.
-    require_mint_revoked: bool = field(default_factory=lambda: _bool("REQUIRE_MINT_REVOKED", True))
-    require_freeze_revoked: bool = field(default_factory=lambda: _bool("REQUIRE_FREEZE_REVOKED", True))
-    # LP lock zorunluluğu KAPALI — fresh launch'larda LP genelde lock'lanmamış
-    require_lp_locked: bool = field(default_factory=lambda: _bool("REQUIRE_LP_LOCKED", False))
-    min_lp_locked_pct: float = field(default_factory=lambda: _float("MIN_LP_LOCKED_PCT", 0))
-    min_lp_lock_days: float = field(default_factory=lambda: _float("MIN_LP_LOCK_DAYS", 0))
-    max_insider_supply_pct: float = field(default_factory=lambda: _float("MAX_INSIDER_SUPPLY_PCT", 25))
-    # Erken aşamada top10 konsantrasyonu yüksek olur — sadece aşırı uçları engelle
-    max_top10_holder_pct: float = field(default_factory=lambda: _float("MAX_TOP10_HOLDER_PCT", 45))
-    max_top1_holder_pct: float = field(default_factory=lambda: _float("MAX_TOP1_HOLDER_PCT", 15))
-    min_holder_count: int = field(default_factory=lambda: _int("MIN_HOLDER_COUNT", 30))
-    # Holder turnover yüksek erken aşamada — sadece dramatik düşüşler
-    max_holder_drop_pct: float = field(default_factory=lambda: _float("MAX_HOLDER_DROP_PCT", 25))
-    holder_history_min_age_min: int = field(default_factory=lambda: _int("HOLDER_HISTORY_MIN_AGE_MIN", 30))
-    holder_history_window_min: int = field(default_factory=lambda: _int("HOLDER_HISTORY_WINDOW_MIN", 180))
-
-    # Dev wallet (creator) takibi: serial rugger'lar
-    # Meşru takım ortalama 2-3 token açar; 15+ ciddi şüphe (memecoin dev'leri seri çıkış yapar)
-    dev_wallet_check_enabled: bool = field(default_factory=lambda: _bool("DEV_WALLET_CHECK_ENABLED", True))
-    max_creator_tokens: int = field(default_factory=lambda: _int("MAX_CREATOR_TOKENS", 15))
-
-    # --- Otomatik alım & devre kesici ---
-    # Felsefe: filtreleri (mint/freeze revoke + honeypot + canlı aktivite)
-    # geçen aday zaten "al" demektir. Skor sıralama için; gate değil.
-    auto_trade_enabled: bool = field(default_factory=lambda: _bool("AUTO_TRADE_ENABLED", True))
-    # Skor 0 = pratikte gate yok (alert eşiği zaten filtre işlevi görür)
-    auto_trade_min_score: float = field(default_factory=lambda: _float("AUTO_TRADE_MIN_SCORE", 0))
-    auto_trade_min_safety_score: float = field(default_factory=lambda: _float("AUTO_TRADE_MIN_SAFETY_SCORE", 0))
-    auto_trade_max_price_impact: float = field(default_factory=lambda: _float("AUTO_TRADE_MAX_PRICE_IMPACT", 5.0))
-
-    # Günlük kayıp tavanı: aşılırsa gün sonuna kadar yeni alım yok
+    # === Risk circuit breaker ===
     daily_loss_stop_sol: float = field(default_factory=lambda: _float("DAILY_LOSS_STOP_SOL", 0.05))
-    # Ardışık N kayıp → manuel /resume'a kadar yeni alım yok
     max_consecutive_losses: int = field(default_factory=lambda: _int("MAX_CONSECUTIVE_LOSSES", 5))
 
-    # --- Adaptive pozisyon büyüklüğü (paper verisinden) ---
-    # Default kapalı — paper 30+ kapanan örnek biriktikten sonra aç
-    adaptive_sizing_enabled: bool = field(default_factory=lambda: _bool("ADAPTIVE_SIZING_ENABLED", False))
-    adaptive_sizing_min_samples: int = field(default_factory=lambda: _int("ADAPTIVE_SIZING_MIN_SAMPLES", 5))
+    # === 5 Hard Filter Gate ===
+    min_liq_usd: float = field(default_factory=lambda: _float("MIN_LIQ_USD", 1000))
+    max_liq_usd: float = field(default_factory=lambda: _float("MAX_LIQ_USD", 500000))
+    min_age_h: float = field(default_factory=lambda: _float("MIN_AGE_H", 0.25))    # 15dk
+    max_age_h: float = field(default_factory=lambda: _float("MAX_AGE_H", 168))     # 7 gün
+    min_txns_h1: int = field(default_factory=lambda: _int("MIN_TXNS_H1", 5))
+    min_buy_ratio: float = field(default_factory=lambda: _float("MIN_BUY_RATIO", 0.40))
+    min_price_h1: float = field(default_factory=lambda: _float("MIN_PRICE_H1", -30))
 
-    # --- Thompson sampling sizing bandit (online RL) ---
-    # SIZING_BANDIT_ENABLED + ADAPTIVE_SIZING_ENABLED ikisi açıksa bandit öncelikli
-    sizing_bandit_enabled: bool = field(default_factory=lambda: _bool("SIZING_BANDIT_ENABLED", False))
+    # === KATMAN 2 Safety (rug barrier) ===
+    require_mint_revoked: bool = field(default_factory=lambda: _bool("REQUIRE_MINT_REVOKED", True))
+    require_freeze_revoked: bool = field(default_factory=lambda: _bool("REQUIRE_FREEZE_REVOKED", True))
+    # Honeypot sim: SOL→token→SOL roundtrip max % kayıp
+    max_roundtrip_loss_pct: float = field(default_factory=lambda: _float("MAX_ROUNDTRIP_LOSS_PCT", 15))
+    max_price_impact_pct: float = field(default_factory=lambda: _float("MAX_PRICE_IMPACT_PCT", 8))
 
-    # --- Pin snapshots ---
-    pin_auto_enabled: bool = field(default_factory=lambda: _bool("PIN_AUTO_ENABLED", True))
-    pin_auto_interval_hours: int = field(default_factory=lambda: _int("PIN_AUTO_INTERVAL_HOURS", 168))  # haftalık
+    # === Execution ===
+    buy_slippage_bps: int = field(default_factory=lambda: _int("BUY_SLIPPAGE_BPS", 500))
+    sell_slippage_bps: int = field(default_factory=lambda: _int("SELL_SLIPPAGE_BPS", 700))
+    dynamic_slippage_enabled: bool = field(default_factory=lambda: _bool("DYNAMIC_SLIPPAGE", True))
+    dynamic_slippage_max_bps: int = field(default_factory=lambda: _int("DYNAMIC_SLIPPAGE_MAX_BPS", 1500))
+    priority_fee_level: str = field(default_factory=lambda: _str("PRIORITY_FEE_LEVEL", "veryHigh"))
+    max_priority_fee_lamports: int = field(default_factory=lambda: _int("MAX_PRIORITY_FEE_LAMPORTS", 5_000_000))
 
-    # --- Multi-wallet rotation ---
-    wallet_pool_enabled: bool = field(default_factory=lambda: _bool("WALLET_POOL_ENABLED", False))
-    # Ek cüzdanların private key'leri virgülle ayrılmış (ana cüzdan WALLET_PRIVATE_KEY)
-    wallet_pool_keys: str = field(default_factory=lambda: _str("WALLET_POOL_KEYS", ""))
+    # === Çıkış stratejisi (matematik temelli) ===
+    # TP1: dinamik anapara kurtarma — sell_pct = 1/(1+tp1_trigger/100) × 1.05
+    tp1_trigger: float = field(default_factory=lambda: _float("TP1_TRIGGER_PCT", 50))
+    # TP2/TP3: moon bag küçültme
+    tp2_trigger: float = field(default_factory=lambda: _float("TP2_TRIGGER_PCT", 200))
+    tp2_sell: float = field(default_factory=lambda: _float("TP2_SELL_PCT", 50))
+    tp3_trigger: float = field(default_factory=lambda: _float("TP3_TRIGGER_PCT", 500))
+    tp3_sell: float = field(default_factory=lambda: _float("TP3_SELL_PCT", 50))
+    # SL + trailing
+    stop_loss: float = field(default_factory=lambda: _float("STOP_LOSS_PCT", 35))
+    trailing_stop: float = field(default_factory=lambda: _float("TRAILING_STOP_PCT", 25))
+    # Hold-time: LP çekiliyor mu (gerçek rug indikatörü)
+    hold_liq_drain_pct: float = field(default_factory=lambda: _float("HOLD_LIQ_DRAIN_PCT", 40))
 
-    # --- MEV / sandwich detection ---
-    mev_monitor_enabled: bool = field(default_factory=lambda: _bool("MEV_MONITOR_ENABLED", True))
-    # Fill ratio bu eşiğin altındaysa sandwich şüphesi
-    mev_detect_fill_threshold: float = field(default_factory=lambda: _float("MEV_DETECT_FILL_THRESHOLD", 0.92))
-    # Bir DEX'te son N swap'tan X%'i şüpheliyse cooldown'a alınır
-    mev_min_swaps_for_cooldown: int = field(default_factory=lambda: _int("MEV_MIN_SWAPS_FOR_COOLDOWN", 10))
-    mev_cooldown_threshold_pct: float = field(default_factory=lambda: _float("MEV_COOLDOWN_THRESHOLD_PCT", 35))
-    mev_cooldown_hours: float = field(default_factory=lambda: _float("MEV_COOLDOWN_HOURS", 4))
-
-    # --- Telegram alpha channel monitor (HTML preview scraping) ---
-    telegram_channels_enabled: bool = field(default_factory=lambda: _bool("TELEGRAM_CHANNELS_ENABLED", False))
-    telegram_channels: str = field(default_factory=lambda: _str("TELEGRAM_CHANNELS", ""))
-    telegram_channels_poll_interval: int = field(default_factory=lambda: _int("TELEGRAM_CHANNELS_POLL_INTERVAL", 300))
-    telegram_mention_score: float = field(default_factory=lambda: _float("TELEGRAM_MENTION_SCORE", 5))
-
-    # --- Pyramid bandit (size_ratio için Thompson sampling) ---
-    pyramid_bandit_enabled: bool = field(default_factory=lambda: _bool("PYRAMID_BANDIT_ENABLED", False))
-
-    # --- Fast-poll loop (time-sensitive source önceliklendirme) ---
-    fast_poll_enabled: bool = field(default_factory=lambda: _bool("FAST_POLL_ENABLED", True))
-    fast_poll_interval: int = field(default_factory=lambda: _int("FAST_POLL_INTERVAL", 15))
-
-    # --- Position correlation manager ---
-    # Felsefe: her coin'i tek başına değerlendir. Gerçek koruma
-    # MAX_OPEN_POSITIONS + MAX_TOTAL_EXPOSURE_SOL + DAILY_LOSS_STOP.
-    # Correlation cap'leri pratikte off (yüksek limit). Aktif etmek istersen düşür.
-    max_positions_per_creator: int = field(default_factory=lambda: _int("MAX_POSITIONS_PER_CREATOR", 10))
-    max_positions_per_window_min: int = field(default_factory=lambda: _int("MAX_POSITIONS_PER_WINDOW_MIN", 30))
-    max_positions_in_window: int = field(default_factory=lambda: _int("MAX_POSITIONS_IN_WINDOW", 10))
-    max_positions_per_sector: int = field(default_factory=lambda: _int("MAX_POSITIONS_PER_SECTOR", 10))
-
-    # --- Helius WebSocket (smart wallet real-time tetikleme) ---
-    helius_ws_enabled: bool = field(default_factory=lambda: _bool("HELIUS_WS_ENABLED", True))
-
-    # --- Slippage-adaptive sizing ---
-    # Yüksek price impact'li alımlarda otomatik küçük poz (Kelly variance adj)
-    slippage_adaptive_sizing: bool = field(default_factory=lambda: _bool("SLIPPAGE_ADAPTIVE_SIZING", True))
-
-    # --- Twitter influencer scanner (Nitter RSS best-effort) ---
-    twitter_enabled: bool = field(default_factory=lambda: _bool("TWITTER_ENABLED", False))
-    # Takip edilecek X kullanıcıları, virgülle ayrılmış (@ olmadan)
-    twitter_handles: str = field(default_factory=lambda: _str("TWITTER_HANDLES", ""))
-    # Nitter mirror — public instance'lar zaman zaman düşer
-    twitter_nitter_base: str = field(default_factory=lambda: _str("TWITTER_NITTER_BASE", "https://nitter.privacydev.net"))
-    twitter_poll_interval: int = field(default_factory=lambda: _int("TWITTER_POLL_INTERVAL", 600))
-    # Bir token mention'ı bot için kaç puan değer
-    twitter_mention_score: float = field(default_factory=lambda: _float("TWITTER_MENTION_SCORE", 5))
-
-    # --- Telegram charts ---
-    charts_enabled: bool = field(default_factory=lambda: _bool("CHARTS_ENABLED", True))
-
-    # --- Auto-tuner (paper data istatistik analizi) ---
-    autotune_enabled: bool = field(default_factory=lambda: _bool("AUTOTUNE_ENABLED", True))
-    autotune_interval_hours: int = field(default_factory=lambda: _int("AUTOTUNE_INTERVAL_HOURS", 24))
-    # Minimum kapanan sample'dan az ise öneri üretmez
-    autotune_min_samples: int = field(default_factory=lambda: _int("AUTOTUNE_MIN_SAMPLES", 20))
-
-    # --- Web dashboard ---
-    dashboard_enabled: bool = field(default_factory=lambda: _bool("DASHBOARD_ENABLED", False))
-    dashboard_port: int = field(default_factory=lambda: _int("DASHBOARD_PORT", 10000))
-    # Render PORT env'i set ederse onu kullan
-    dashboard_render_port: str = field(default_factory=lambda: _str("PORT", ""))
-    # Token auth — URL'de ?token=XXX olarak gelmeli
-    dashboard_token: str = field(default_factory=lambda: _str("DASHBOARD_TOKEN", ""))
-
-    # --- Pyramid / DCA (anti-martingale: kazanan trende ekleme) ---
-    # Strateji çekirdeği: TP1 sonrası (anapara kasada) yeni ATH'lere pyramid
+    # === Pyramid (anti-martingale) ===
     pyramid_enabled: bool = field(default_factory=lambda: _bool("PYRAMID_ENABLED", True))
     pyramid_max_adds: int = field(default_factory=lambda: _int("PYRAMID_MAX_ADDS", 2))
-    # TP1 trigger'ından sonra her +N% adımında bir add tetiklenir
-    # TP1 +50, step 50 → addler +100, +150 noktalarında
+    # TP1 sonrası her +N% adımında ekle (TP1=50, step=50 → 100, 150 noktalarında)
     pyramid_trigger_step_pct: float = field(default_factory=lambda: _float("PYRAMID_TRIGGER_STEP_PCT", 50))
-    # Her add miktarı = BUY_AMOUNT_SOL × bu oran
     pyramid_size_ratio: float = field(default_factory=lambda: _float("PYRAMID_SIZE_RATIO", 0.5))
 
-    # --- Paper trading (gerçek para riskine girmeden veri biriktir) ---
-    paper_trading_enabled: bool = field(default_factory=lambda: _bool("PAPER_TRADING_ENABLED", True))
-
-    # --- Makro snapshot (analog backtest arşivi) ---
-    macro_snapshot_enabled: bool = field(default_factory=lambda: _bool("MACRO_SNAPSHOT_ENABLED", True))
-    macro_snapshot_interval: int = field(default_factory=lambda: _int("MACRO_SNAPSHOT_INTERVAL", 3600))
-    # CoinGecko free tier datacenter IP'lerini bazen rate-limit'liyor.
-    # Demo key (ücretsiz signup) varsa header ile geçer, hata azaltır.
-    coingecko_api_key: str = field(default_factory=lambda: _str("COINGECKO_API_KEY", ""))
-    # /analog raporunda kullanılan en benzer N sinyal
-    analog_top_n: int = field(default_factory=lambda: _int("ANALOG_TOP_N", 20))
-
-    # --- Kaynak: pump.fun graduation hook ---
-    # Graduate olan token Raydium'a düşer; DexScreener indexlemeden önce yakala
+    # === Pump.fun graduate kaynağı ===
     pumpfun_enabled: bool = field(default_factory=lambda: _bool("PUMPFUN_ENABLED", True))
     pumpfun_fetch_limit: int = field(default_factory=lambda: _int("PUMPFUN_FETCH_LIMIT", 30))
-    # Pre-graduation aktif coin'ler için fetch limiti (sosyal velocity tracking)
-    pumpfun_active_fetch_limit: int = field(default_factory=lambda: _int("PUMPFUN_ACTIVE_FETCH_LIMIT", 100))
 
-    # --- Pre-bonding curve detection + sosyal velocity ---
-    prepump_enabled: bool = field(default_factory=lambda: _bool("PREPUMP_ENABLED", True))
-    prepump_check_interval: int = field(default_factory=lambda: _int("PREPUMP_CHECK_INTERVAL", 300))
-    prepump_min_progress_pct: float = field(default_factory=lambda: _float("PREPUMP_MIN_PROGRESS_PCT", 70))
-    prepump_min_replies: int = field(default_factory=lambda: _int("PREPUMP_MIN_REPLIES", 30))
-    prepump_min_velocity_per_hour: float = field(default_factory=lambda: _float("PREPUMP_MIN_VELOCITY_PER_HOUR", 10))
-    prepump_min_mc_usd: float = field(default_factory=lambda: _float("PREPUMP_MIN_MC_USD", 30000))
-
-    # --- PumpPortal: bonding curve direkt trade ---
-    pumpportal_enabled: bool = field(default_factory=lambda: _bool("PUMPPORTAL_ENABLED", False))
-    pumpportal_buy_amount_sol: float = field(default_factory=lambda: _float("PUMPPORTAL_BUY_AMOUNT_SOL", 0.01))
-    pumpportal_slippage_pct: int = field(default_factory=lambda: _int("PUMPPORTAL_SLIPPAGE_PCT", 15))
-    pumpportal_priority_fee_sol: float = field(default_factory=lambda: _float("PUMPPORTAL_PRIORITY_FEE_SOL", 0.001))
-    # Pump pozisyon monitor — interval (DS price feed yerine pump.fun reserves'tan)
-    pump_monitor_interval: int = field(default_factory=lambda: _int("PUMP_MONITOR_INTERVAL", 30))
-
-    # --- LunarCrush social analytics ---
-    lunarcrush_enabled: bool = field(default_factory=lambda: _bool("LUNARCRUSH_ENABLED", True))
-    lunarcrush_api_key: str = field(default_factory=lambda: _str("LUNARCRUSH_API_KEY", ""))
-
-    # --- ML scoring (paper + real closed trade'lerden öğrenir) ---
-    ml_enabled: bool = field(default_factory=lambda: _bool("ML_ENABLED", True))
-    # Bir trade kazanan sayılması için min pnl_pct
-    ml_win_threshold_pct: float = field(default_factory=lambda: _float("ML_WIN_THRESHOLD_PCT", 30))
-    # Train için minimum kapanan sample sayısı
-    ml_min_samples: int = field(default_factory=lambda: _int("ML_MIN_SAMPLES", 30))
-    # ML predicted_win_prob'tan kazanılan max skor puanı
-    ml_max_score_points: float = field(default_factory=lambda: _float("ML_MAX_SCORE_POINTS", 20))
-
-    # --- Kaynak + skor: Smart wallet tracking ---
-    smart_wallets_enabled: bool = field(default_factory=lambda: _bool("SMART_WALLETS_ENABLED", True))
-    # İlk run'da dosya yoksa env'den seed: "addr1:label1,addr2:label2,..."
-    smart_wallets_seed: str = field(default_factory=lambda: _str("SMART_WALLETS", ""))
-    smart_wallets_poll_interval: int = field(default_factory=lambda: _int("SMART_WALLETS_POLL_INTERVAL", 60))
-    smart_buy_window_min: int = field(default_factory=lambda: _int("SMART_BUY_WINDOW_MIN", 60))
-    # Bir tokenı sadece smart wallet alımlarından dolayı scan'e enjekte etmek için min eşik
-    smart_min_buys_for_inject: int = field(default_factory=lambda: _int("SMART_MIN_BUYS_FOR_INJECT", 2))
-
-    # Smart wallet exit signal — smart wallet listesi popüle ise faydalı.
-    # Liste boşsa zaten tetik yok, ama config gürültüsünü azaltmak için kapalı.
-    smart_exit_signals_enabled: bool = field(default_factory=lambda: _bool("SMART_EXIT_SIGNALS_ENABLED", False))
-    smart_exit_window_min: int = field(default_factory=lambda: _int("SMART_EXIT_WINDOW_MIN", 30))
-    # Wallet'in alımını görmediysek minimum sell SOL eşiği — gürültü filtresi
-    smart_exit_min_sol: float = field(default_factory=lambda: _float("SMART_EXIT_MIN_SOL", 0.5))
-
-    # Hold-time KATMAN 2 re-check: açık pozisyonu periyodik olarak gözden geçir
-    hold_safety_check_enabled: bool = field(default_factory=lambda: _bool("HOLD_SAFETY_CHECK_ENABLED", True))
-    # Her pozisyon için min kaç saniyede bir safety re-check (RugCheck cache 10dk)
-    hold_safety_check_interval: int = field(default_factory=lambda: _int("HOLD_SAFETY_CHECK_INTERVAL", 300))
-    # Likidite girişten % bu kadar düşerse rug in progress → kapat
-    hold_liq_drain_pct: float = field(default_factory=lambda: _float("HOLD_LIQ_DRAIN_PCT", 35))
-    # Top10 holder konsantrasyonu pp sıçraması: erken aşamada top10 yüksek olur,
-    # check'in faydası az. Default 999 = disabled. Etkinleştirmek için düşür.
-    hold_top10_spike_pp: float = field(default_factory=lambda: _float("HOLD_TOP10_SPIKE_PP", 999))
-
-    # Insider exit detection: entry holder'larından N kadarı bakiyesinin X%'ini düşürürse kapat
-    hold_insider_exit_min_drop_pct: float = field(default_factory=lambda: _float("HOLD_INSIDER_EXIT_MIN_DROP_PCT", 50))
-    hold_insider_exit_min_wallets: int = field(default_factory=lambda: _int("HOLD_INSIDER_EXIT_MIN_WALLETS", 3))
-
-    # Wallet quality scorer
-    wallet_outcomes_interval: int = field(default_factory=lambda: _int("WALLET_OUTCOMES_INTERVAL", 600))
-    # quality < bu eşik VE n >= min_samples → otomatik disable
-    wallet_auto_disable_quality: float = field(default_factory=lambda: _float("WALLET_AUTO_DISABLE_QUALITY", 30))
-    wallet_auto_disable_min_samples: int = field(default_factory=lambda: _int("WALLET_AUTO_DISABLE_MIN_SAMPLES", 15))
-
-    # Wallet auto-discovery (kazanan sinyallerin ilk alıcılarından öğren)
-    discovery_enabled: bool = field(default_factory=lambda: _bool("DISCOVERY_ENABLED", True))
-    discovery_interval: int = field(default_factory=lambda: _int("DISCOVERY_INTERVAL", 3600))
-    # +X% zirve yapmış finalize sinyaller "winner" sayılır
-    discovery_winner_threshold_pct: float = field(default_factory=lambda: _float("DISCOVERY_WINNER_THRESHOLD_PCT", 100))
-    # Token oluşumundan sonraki ilk N saatte alanları topla
-    discovery_early_window_h: float = field(default_factory=lambda: _float("DISCOVERY_EARLY_WINDOW_H", 1))
-    # K+ kazananda yakalanan candidate → smart_wallets'a otomatik terfi
-    discovery_min_winners_to_promote: int = field(default_factory=lambda: _int("DISCOVERY_MIN_WINNERS_TO_PROMOTE", 2))
-    discovery_max_winners_per_run: int = field(default_factory=lambda: _int("DISCOVERY_MAX_WINNERS_PER_RUN", 5))
-
-    # --- Profile-aware scoring ---
-    # Skor componentlerini early vs trend için farklı ağırlıklarla ölçeklendir
-    profile_aware_scoring: bool = field(default_factory=lambda: _bool("PROFILE_AWARE_SCORING", True))
-
-    # Backtest / sinyal performans logu
-    signal_tracking_enabled: bool = field(default_factory=lambda: _bool("SIGNAL_TRACKING_ENABLED", True))
-    signal_tracking_interval: int = field(default_factory=lambda: _int("SIGNAL_TRACKING_INTERVAL", 600))
-    max_price_impact_pct: float = field(default_factory=lambda: _float("MAX_PRICE_IMPACT_PCT", 5))
-    max_roundtrip_loss_pct: float = field(default_factory=lambda: _float("MAX_ROUNDTRIP_LOSS_PCT", 15))
-
-    # --- Skor ---
-    # Daha seçici: alert için 55, yüksek güven 72
-    # Skor eşiği — erken aşamada birçok component 0 (twitter/ml/lunar yok),
-    # bu yüzden alt bar düşürüldü. Yüksek-güven yine de 70+ kalsın.
-    min_score_to_alert: float = field(default_factory=lambda: _float("MIN_SCORE_TO_ALERT", 35))
-    high_confidence_score: float = field(default_factory=lambda: _float("HIGH_CONFIDENCE_SCORE", 65))
-
-    # --- Loop ---
+    # === Loop interval'ları ===
     scan_interval: int = field(default_factory=lambda: _int("SCAN_INTERVAL", 60))
     monitor_interval: int = field(default_factory=lambda: _int("MONITOR_INTERVAL", 20))
-    heartbeat_interval: int = field(default_factory=lambda: _int("HEARTBEAT_INTERVAL", 300))
 
-    # --- Anti-spam ---
-    # Sinyal skoruna göre değişken cooldown: yüksek skor → kısa cooldown (fırsat kaçırma)
-    cooldown_hours_high: float = field(default_factory=lambda: _float("COOLDOWN_HOURS_HIGH", 6))
-    cooldown_hours_mid: float = field(default_factory=lambda: _float("COOLDOWN_HOURS_MID", 12))
+    # === Anti-spam ===
+    # Aynı tokeni cooldown saatleri (filtre eledikten sonra ne kadar tekrar bakmasın)
+    cooldown_hours_pass: float = field(default_factory=lambda: _float("COOLDOWN_HOURS_PASS", 6))
     cooldown_hours_reject: float = field(default_factory=lambda: _float("COOLDOWN_HOURS_REJECT", 24))
-    max_alerts_per_scan: int = field(default_factory=lambda: _int("MAX_ALERTS_PER_SCAN", 3))
 
-    # --- Sabitler ---
+    # === Sabitler ===
     sol_mint: str = "So11111111111111111111111111111111111111112"
     usdc_mint: str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
