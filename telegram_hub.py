@@ -79,7 +79,10 @@ class TelegramHub:
         )
 
     async def _reply(self, update: Update, text: str) -> None:
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        if update.message:
+            await update.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=PERSISTENT_KEYBOARD)
+        elif update.callback_query and update.callback_query.message:
+            await update.callback_query.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=PERSISTENT_KEYBOARD)
 
     async def _status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         text = await self.status_cb() if self.status_cb else self.store.status_text()
@@ -106,6 +109,21 @@ class TelegramHub:
         await query.answer()
         data = query.data or ""
         action, _, token = data.partition(":")
+        # Compatibility: old inline buttons may send scan_stats/stats/status as callback_data.
+        if action in {"scan_stats", "stats"}:
+            try:
+                text = await self.scan_stats_cb() if self.scan_stats_cb else "Henüz tarama yok."
+            except Exception as e:
+                log.exception("scan_stats callback failed")
+                text = f"⚠️ Tarama istatistiği okunamadı: <code>{_esc(e)}</code>"
+            await query.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=PERSISTENT_KEYBOARD)
+            return
+
+        if action == "status":
+            text = await self.status_cb() if self.status_cb else self.store.status_text()
+            await query.message.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=PERSISTENT_KEYBOARD)
+            return
+
         if action == "ignore":
             text = await self.ignore_cb(token) if self.ignore_cb else "Ignore callback hazır değil."
             await query.edit_message_reply_markup(reply_markup=None)
