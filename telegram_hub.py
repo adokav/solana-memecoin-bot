@@ -29,14 +29,15 @@ BuyHandler = Callable[[str], Awaitable[tuple[bool, str]]]
 
 BOT_COMMANDS = [
     ("start", "Bot durumu ve komutlar"),
-    ("status", "Aktif izleme listesi"),
+    ("status", "Bot durumu"),
     ("scan_stats", "Son tarama istatistikleri"),
-    ("scan_status", "Son tarama istatistikleri"),
     ("ignore", "Token izlemeyi bırak: /ignore <mint>"),
 ]
 
 PERSISTENT_KEYBOARD = ReplyKeyboardMarkup(
-    [["/status", "/scan_stats"], ["status", "scan_stats"]],
+    [
+        ["/status", "/scan_stats"],
+    ],
     resize_keyboard=True,
     is_persistent=True,
 )
@@ -54,12 +55,12 @@ def _norm_button_text(value: str | None) -> str:
     # Keep letters, digits and underscores; remove emojis/spaces/punctuation.
     compact = "".join(ch for ch in text if ch.isalnum() or ch == "_")
     aliases = {
-        "scanstatus": "scan_stats",
-        "scan_status": "scan_stats",
+        "status": "status",
         "scanstats": "scan_stats",
         "scan_stats": "scan_stats",
+        "scanstatus": "scan_stats",
+        "scan_status": "scan_stats",
         "stats": "scan_stats",
-        "status": "status",
         "start": "start",
     }
     return aliases.get(compact, compact)
