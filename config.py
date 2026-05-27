@@ -123,9 +123,10 @@ class Config:
     early_max_buy_ratio: float = field(default_factory=lambda: _float("EARLY_MAX_BUY_RATIO", 0.88))
 
     # Ortalama işlem boyutu (wash trading / micro-spam filtresi)
-    # Memecoin'lerde küçük alımlar normal — alt sınırı dar tutma
-    min_avg_tx_size_usd: float = field(default_factory=lambda: _float("MIN_AVG_TX_SIZE_USD", 5))
-    max_avg_tx_size_usd: float = field(default_factory=lambda: _float("MAX_AVG_TX_SIZE_USD", 500))
+    # Memecoin fresh launch'larda alımlar çok küçük olur ($0.50-$2);
+    # whale gelirse $1000+ olabilir. Geniş tut.
+    min_avg_tx_size_usd: float = field(default_factory=lambda: _float("MIN_AVG_TX_SIZE_USD", 1))
+    max_avg_tx_size_usd: float = field(default_factory=lambda: _float("MAX_AVG_TX_SIZE_USD", 5000))
     avg_tx_min_txns: int = field(default_factory=lambda: _int("AVG_TX_MIN_TXNS", 50))
 
     # --- KATMAN 1: Trend takip ---
