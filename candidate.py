@@ -30,6 +30,33 @@ class Candidate:
     pair_age_h: float
     url: str
 
+    @property
+    def buy_ratio(self) -> float:
+        """Buy ratio as percentage 0-100 for backward-compatible filters."""
+        return (self.buys_h1 / max(self.txns_h1, 1)) * 100.0
+
+    @property
+    def buy_ratio_fraction(self) -> float:
+        """Buy ratio as fraction 0-1."""
+        return self.buys_h1 / max(self.txns_h1, 1)
+
+    @property
+    def volume_liq_ratio(self) -> float:
+        """1h volume divided by liquidity."""
+        return self.volume_h1 / max(self.liquidity_usd, 1.0)
+
+    @property
+    def liq_usd(self) -> float:
+        return self.liquidity_usd
+
+    @property
+    def h1(self) -> float:
+        return self.price_change_h1
+
+    @property
+    def h6(self) -> float:
+        return self.price_change_h6
+
 
 def parse(p: dict) -> Candidate | None:
     """DexScreener pair dict'inden Candidate çıkar. Hatalıysa None."""

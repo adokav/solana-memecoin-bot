@@ -1,115 +1,111 @@
-"""Position storage. JSON disk persist.
+"""Small JSON storage for alert-only operation."""
+from __future__ import annotations
 
-Lean: sadece gerekli alanlar. Eski JSON dosyalarındaki extra field'lar
-forward-compat ile sessizce ignore edilir.
-"""
 import json
 import logging
-from dataclasses import asdict, dataclass, field, fields
+import time
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from config import config
 
 log = logging.getLogger(__name__)
-
-DB_PATH = config.data_dir / "positions.json"
-
-
-@dataclass
-class TpHit:
-    level: int
-    trigger_pct: float
-    sold_pct: float
-    sold_amount_raw: int
-    sol_received: float
-    tx_sig: str
-    ts: float
+DB_PATH = config.data_dir / "alerts.json"
 
 
 @dataclass
-class PyramidAdd:
-    pct_at_add: float
-    price_usd: float
-    amount_raw: int
-    sol_spent: float
-    tx_sig: str
-    ts: float
-
-
-@dataclass
-class Position:
+class WatchedToken:
     pair_address: str
     base_token: str
     symbol: str
-    entry_price_usd: float           # add'lerden sonra blended
+    url: str
+    first_price_usd: float
     peak_price_usd: float
-    amount_raw: int                  # alımda alınan toplam (add ile artar)
-    remaining_raw: int               # partial sell'lerden sonra kalan
-    sol_spent: float                 # toplam harcanan (add dahil)
-    sol_received_total: float = 0.0
-    opened_at: float = 0.0
-    tx_open: str = ""
-    tp_hits: list[TpHit] = field(default_factory=list)
-    breakeven_armed: bool = False    # TP1 sonrası SL → 0%
-    status: str = "open"             # open | closed
-    closed_at: Optional[float] = None
-    pnl_pct: Optional[float] = None
-    close_reason: Optional[str] = None
-    # Pyramid (anti-martingale)
-    original_entry_price_usd: Optional[float] = None  # pyramid trigger için referans
-    pyramid_adds: list[PyramidAdd] = field(default_factory=list)
-    # Hold-time safety: entry'deki likidite snapshot (drain check için)
-    entry_liquidity_usd: Optional[float] = None
+    first_liquidity_usd: float
+    last_price_usd: float
+    last_liquidity_usd: float
+    alerted_at: float
+    last_checked_at: float = 0.0
+    warned: bool = False
+    ignored: bool = False
 
 
-_KNOWN_FIELDS = {f.name for f in fields(Position)}
+@dataclass
+class AlertEvent:
+    ts: float
+    symbol: str
+    base_token: str
+    pair_address: str
+    opportunity_score: int
+    risk_score: int
 
 
 @dataclass
 class Store:
-    positions: list[Position] = field(default_factory=list)
+    watched: list[WatchedToken] = field(default_factory=list)
+    alerts: list[AlertEvent] = field(default_factory=list)
 
     @classmethod
     def load(cls) -> "Store":
         if not DB_PATH.exists():
             return cls()
         try:
-            data = json.loads(DB_PATH.read_text())
-            positions = []
-            for p in data.get("positions", []):
-                # Forward-compat: eski JSON'larda olabilecek extra field'ları ignore et
-                tp_hits_raw = p.pop("tp_hits", [])
-                pyr_raw = p.pop("pyramid_adds", [])
-                p_filtered = {k: v for k, v in p.items() if k in _KNOWN_FIELDS}
-                tp_hits = [TpHit(**h) for h in tp_hits_raw]
-                pyramid_adds = [PyramidAdd(**a) for a in pyr_raw]
-                positions.append(Position(
-                    tp_hits=tp_hits, pyramid_adds=pyramid_adds, **p_filtered,
-                ))
-            return cls(positions=positions)
-        except (json.JSONDecodeError, TypeError, KeyError) as e:
+            raw = json.loads(DB_PATH.read_text())
+            watched = [WatchedToken(**x) for x in raw.get("watched", [])]
+            alerts = [AlertEvent(**x) for x in raw.get("alerts", [])]
+            return cls(watched=watched, alerts=alerts)
+        except Exception as e:
             log.error("storage load error: %s", e)
             return cls()
 
     def save(self) -> None:
-        DB_PATH.write_text(json.dumps(
-            {"positions": [asdict(p) for p in self.positions]},
-            indent=2,
-        ))
+        DB_PATH.write_text(json.dumps(asdict(self), indent=2, ensure_ascii=False))
 
-    def open_positions(self) -> list[Position]:
-        return [p for p in self.positions if p.status == "open"]
-
-    def find_by_pair(self, pair: str) -> Optional[Position]:
-        return next(
-            (p for p in self.positions if p.pair_address == pair and p.status == "open"),
-            None,
-        )
-
-    def add(self, pos: Position) -> None:
-        self.positions.append(pos)
+    def add_alert(self, event: AlertEvent) -> None:
+        self.alerts.append(event)
+        self.alerts = self.alerts[-500:]
         self.save()
 
-    def update(self) -> None:
+    def upsert_watch(self, token: WatchedToken) -> None:
+        for i, old in enumerate(self.watched):
+            if old.base_token == token.base_token:
+                self.watched[i] = token
+                self.save()
+                return
+        self.watched.append(token)
         self.save()
+
+    def find_watch(self, token_mint: str) -> WatchedToken | None:
+        return next((w for w in self.watched if w.base_token == token_mint), None)
+
+    def ignore(self, token_mint: str) -> bool:
+        item = self.find_watch(token_mint)
+        if not item:
+            return False
+        item.ignored = True
+        self.save()
+        return True
+
+    def active_watches(self) -> list[WatchedToken]:
+        max_age = config.watch_ttl_hours * 3600
+        now = time.time()
+        return [
+            w for w in self.watched
+            if not w.ignored and (now - w.alerted_at) <= max_age
+        ]
+
+    def status_text(self) -> str:
+        active = self.active_watches()
+        lines = [
+            "📡 <b>Alert-only bot durumu</b>",
+            f"Aktif izleme: <code>{len(active)}</code>",
+            f"Toplam alert: <code>{len(self.alerts)}</code>",
+            f"Otomatik alım: <b>kapalı</b>",
+        ]
+        for w in active[:10]:
+            dd = ((w.peak_price_usd - w.last_price_usd) / max(w.peak_price_usd, 1e-12)) * 100
+            lines.append(
+                f"• ${w.symbol} price=<code>${w.last_price_usd:.8f}</code> "
+                f"peak DD=<code>{dd:.1f}%</code>"
+            )
+        return "\n".join(lines)
