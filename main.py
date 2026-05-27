@@ -1,268 +1,166 @@
-"""Lean orchestrator — detect → safety → buy → monitor.
+"""Alert-only Solana memecoin watcher.
 
-3 async loop:
-  - scan_loop: kaynakları çek, filtreyi geçenleri safety + auto-buy
-  - monitor_loop: açık pozisyonları izle (TP1/2/3, trailing, SL, pyramid)
-  - telegram polling: komut dinleme (TelegramHub içinde)
-
-Tüm strateji parametre kararları matematik temelli (config.py docstring).
+Flow:
+1. Discover fresh tokens from DexScreener and pump.fun.
+2. Apply strict hard filters and RugCheck/Jupiter quote safety.
+3. Send Telegram opportunity alerts; no automatic buying.
+4. Watch alerted tokens and warn when the setup breaks.
+5. Optional close button sells the wallet's full token balance if WALLET_PRIVATE_KEY is set.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import signal
-import time
+from contextlib import suppress
 
-from candidate import Candidate
+import base58
+from solders.keypair import Keypair
+
 from config import config
 from dexscreener import DexScreener
-from jupiter import Jupiter, LAMPORTS_PER_SOL
-from monitor import Monitor
+from jupiter import Jupiter, JupiterError, LAMPORTS_PER_SOL
+from opportunity import score as opportunity_score
 from pumpfun import PumpFun
-from risk import Risk
 from safety import Safety
 from screener import Screener
-from stats import compute as stats_compute, format_stats
-from storage import Position, Store
+from storage import Store
 from telegram_hub import TelegramHub
-from wallet import load_keypair
+from watchlist import WatchList
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-7s %(name)-12s | %(message)s",
-)
-log = logging.getLogger("main")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("memecoin-alert-bot")
+
+
+def _load_keypair_optional() -> Keypair | None:
+    if not config.wallet_private_key:
+        return None
+    try:
+        return Keypair.from_bytes(base58.b58decode(config.wallet_private_key.strip()))
+    except Exception as e:
+        log.error("WALLET_PRIVATE_KEY invalid; close button disabled: %s", e)
+        return None
 
 
 class Bot:
     def __init__(self) -> None:
-        kp = load_keypair()
-        self.wallet_pubkey = str(kp.pubkey())
-        log.info("wallet: %s", self.wallet_pubkey)
-
+        self.store = Store.load()
         self.ds = DexScreener()
         self.pf = PumpFun()
-        self.jup = Jupiter(kp)
+        self.keypair = _load_keypair_optional()
+        self.jup = Jupiter(self.keypair)
         self.safety = Safety(self.jup)
-        self.store = Store.load()
-        self.tg = TelegramHub()
-        self.risk = Risk()
         self.screener = Screener(self.ds, self.pf)
-        self.monitor = Monitor(self.ds, self.jup, self.store, self.tg)
-
-        # Wire Telegram callbacks
-        self.tg.status_cb = self.status_text
-        self.tg.pnl_cb = self.pnl_text
-        self.tg.stats_cb = self.stats_text
-        self.tg.scan_stats_cb = self.scan_stats_text
-        self.tg.halt_cb = self.halt_text
-        self.tg.resume_cb = self.resume_text
-        self.tg.close_cb = self.close_text
-
+        self.watchlist = WatchList(self.store, self.ds)
+        self.tg = TelegramHub(self.store, close_handler=self.quick_close if self.keypair else None)
         self._stop = asyncio.Event()
-        self._last_scan_ts: float = 0.0
-        self._last_scan_count: int = 0
 
-    # ---------- Telegram text callbacks ----------
+        self.tg.status_cb = self.status_text
+        self.tg.scan_stats_cb = self.scan_stats_text
+        self.tg.ignore_cb = self.ignore_token
 
     async def status_text(self) -> str:
-        opens = self.store.open_positions()
-        if not opens:
-            return "📭 Açık pozisyon yok."
-        lines = [f"📂 <b>{len(opens)} açık pozisyon</b>\n"]
-        for p in opens:
-            pair = await self.ds.pair("solana", p.pair_address)
-            price_now = float((pair or {}).get("priceUsd") or 0) if pair else 0
-            tps = ",".join(str(h.level) for h in p.tp_hits) or "—"
-            if price_now > 0 and p.entry_price_usd > 0:
-                pnl = ((price_now - p.entry_price_usd) / p.entry_price_usd) * 100
-                lines.append(
-                    f"• <b>${p.symbol}</b>  <code>{pnl:+.1f}%</code>  "
-                    f"TP:[{tps}]  "
-                    f"kalan <code>{p.remaining_raw / max(p.amount_raw, 1) * 100:.0f}%</code>"
-                )
-            else:
-                lines.append(f"• ${p.symbol} (fiyat alınamadı)")
-        return "\n".join(lines)
-
-    async def pnl_text(self) -> str:
-        s = stats_compute(self.store.positions)
-        if s is None:
-            return "📭 Kapanan pozisyon yok."
-        emoji = "🟢" if s.total_pnl_sol >= 0 else "🔴"
-        return (
-            f"💼 <b>PnL özeti</b>\n"
-            f"İşlem: <code>{s.n}</code>  W/L: <code>{s.n_win}/{s.n_loss}</code>  "
-            f"WR: <code>{s.p_win * 100:.0f}%</code>\n"
-            f"{emoji} Net: <code>{s.total_pnl_sol:+.4f} SOL</code>\n"
-            f"Ort kazanan: <code>{s.avg_win_pct:+.1f}%</code>  "
-            f"ort kaybeden: <code>{s.avg_loss_pct:+.1f}%</code>\n"
-            f"EV/trade: <code>{s.ev_pct:+.2f}%</code>"
-        )
-
-    async def stats_text(self) -> str:
-        return format_stats(self.store.positions)
+        close_state = "aktif" if self.keypair else "pasif"
+        return self.store.status_text() + f"\nHızlı kapatma: <b>{close_state}</b>"
 
     async def scan_stats_text(self) -> str:
         return self.screener.format_scan_stats()
 
-    async def halt_text(self, reason: str) -> str:
-        self.risk.halt(reason or "manual", until_ts=0.0)
-        return self.risk.status_text(self.store.positions)
+    async def ignore_token(self, token_mint: str) -> str:
+        ok = self.watchlist.ignore(token_mint.strip())
+        return "🚫 Token izleme listesinden çıkarıldı." if ok else "Token izleme listesinde bulunamadı."
 
-    async def resume_text(self) -> str:
-        self.risk.resume("manual")
-        return self.risk.status_text(self.store.positions)
-
-    async def close_text(self, arg: str) -> str:
-        ok, msg = await self.monitor.manual_close(arg)
-        return ("✅ " if ok else "⚠️ ") + msg
-
-    # ---------- Buy flow ----------
-
-    async def _try_buy(self, c: Candidate) -> None:
-        """5-gate ve safety geçti varsayılıyor. Risk gate + Jupiter."""
-        if self.store.find_by_pair(c.pair_address):
-            return
-        allowed, why = self.risk.check_pre_buy(self.store.positions)
-        if not allowed:
-            await self.tg.info(
-                f"⛔ <b>${c.base_symbol}</b> atlandı — {why}"
-            )
-            return
-
-        log.info("BUY %s amount=%.4f SOL", c.base_symbol, config.buy_amount_sol)
+    async def quick_close(self, token_mint: str) -> tuple[bool, str]:
+        if not self.keypair:
+            return False, "Hızlı kapatma pasif: WALLET_PRIVATE_KEY tanımlı değil."
         try:
-            sig, tokens_raw = await self.jup.buy(c.base_token, config.buy_amount_sol)
+            sig, sold_raw, out_lamports = await self.jup.sell_all(token_mint)
+            sol = out_lamports / LAMPORTS_PER_SOL
+            return True, (
+                "Satış emri gönderildi.\n"
+                f"Token raw: <code>{sold_raw}</code>\n"
+                f"Tahmini SOL: <code>{sol:.5f}</code>\n"
+                f"https://solscan.io/tx/{sig}"
+            )
+        except JupiterError as e:
+            return False, f"Satış başarısız: <code>{e}</code>"
         except Exception as e:
-            log.exception("buy failed")
-            await self.tg.info(f"❌ Alım hatası ${c.base_symbol}: <code>{e}</code>")
-            return
-
-        pos = Position(
-            pair_address=c.pair_address,
-            base_token=c.base_token,
-            symbol=c.base_symbol,
-            entry_price_usd=c.price_usd,
-            peak_price_usd=c.price_usd,
-            amount_raw=tokens_raw,
-            remaining_raw=tokens_raw,
-            sol_spent=config.buy_amount_sol,
-            opened_at=time.time(),
-            tx_open=sig,
-            original_entry_price_usd=c.price_usd,
-            entry_liquidity_usd=c.liquidity_usd,
-        )
-        self.store.add(pos)
-        self.screener.mark_seen(c.base_token, passed=True)
-
-        await self.tg.info(
-            f"✅ <b>${c.base_symbol}</b> ALINDI\n"
-            f"Giriş: <code>${c.price_usd:.8f}</code>  "
-            f"liq <code>${c.liquidity_usd:,.0f}</code>\n"
-            f"Harcanan: <code>{config.buy_amount_sol:.4f} SOL</code>\n\n"
-            f"Strateji:\n"
-            f"• TP1 +{config.tp1_trigger:.0f}% → dinamik anapara kurtarma\n"
-            f"• Pyramid: ATH'lere ekle (post-TP1)\n"
-            f"• TP2/TP3: moon bag küçültme\n"
-            f"• Trailing %{config.trailing_stop:.0f}\n"
-            f"• Pre-TP1 SL %{config.stop_loss:.0f}\n\n"
-            f"<a href=\"https://solscan.io/tx/{sig}\">solscan</a> · "
-            f"<a href=\"{c.url}\">dexscreener</a>"
-        )
-
-    # ---------- Loops ----------
+            log.exception("quick close error")
+            return False, f"Satış hatası: <code>{e}</code>"
 
     async def scan_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                candidates, result = await self.screener.scan()
-                self._last_scan_ts = time.time()
-                self._last_scan_count = result.passed
-
+                candidates, _ = await self.screener.scan()
                 for c in candidates:
-                    # KATMAN 2 safety
-                    safe, reason = await self.safety.check(c.base_token)
-                    if not safe:
-                        log.info("SAFETY SKIP %s: %s", c.base_symbol, reason)
+                    ok, safety_reason = await self.safety.check(c.base_token)
+                    if not ok:
                         self.screener.mark_seen(c.base_token, passed=False)
+                        log.info("safety reject %s: %s", c.base_symbol, safety_reason)
                         continue
-                    # Auto-buy
-                    await self._try_buy(c)
+
+                    op = opportunity_score(c, safety_reason)
+                    await self.tg.send_opportunity(c, op)
+                    if config.watch_after_alert:
+                        self.watchlist.add_candidate(c)
+                    self.screener.mark_seen(c.base_token, passed=True)
+                    await asyncio.sleep(0.5)
             except Exception:
                 log.exception("scan loop error")
-            await asyncio.sleep(config.scan_interval)
 
-    async def monitor_loop(self) -> None:
-        prev_closed: set[str] = {
-            p.pair_address for p in self.store.positions if p.status == "closed"
-        }
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._stop.wait(), timeout=config.scan_interval)
+
+    async def watch_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                await self.monitor.tick()
-                # Risk circuit breaker: yeni kapanmış varsa eşik kontrol
-                halted, reason = self.risk.check_post_close(self.store.positions)
-                if halted:
-                    await self.tg.info(
-                        f"⛔ <b>Risk gate kapatıldı</b>\n"
-                        f"Sebep: <code>{reason}</code>\n"
-                        f"<i>/resume ile aç.</i>"
-                    )
+                warnings = await self.watchlist.tick()
+                for warning in warnings:
+                    await self.tg.send_watch_warning(warning)
+                    await asyncio.sleep(0.3)
             except Exception:
-                log.exception("monitor loop error")
-            await asyncio.sleep(config.monitor_interval)
+                log.exception("watch loop error")
 
-    # ---------- Lifecycle ----------
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._stop.wait(), timeout=config.monitor_interval)
 
     async def run(self) -> None:
-        await self.tg.start()
-        await self.tg.info(
-            f"🤖 <b>Memecoin Sniper başladı</b> (lean v2)\n"
-            f"Cüzdan: <code>{self.wallet_pubkey[:8]}...{self.wallet_pubkey[-6:]}</code>\n"
-            f"Tarama her {config.scan_interval}s\n"
-            f"BUY_AMOUNT: {config.buy_amount_sol} SOL  "
-            f"max_open: {config.max_open_positions}\n"
-            f"5-gate filter: liq>${config.min_liq_usd:.0f} · "
-            f"age {config.min_age_h}-{config.max_age_h}h · "
-            f"txns≥{config.min_txns_h1} · buy≥{config.min_buy_ratio:.0%}\n"
-            f"Strateji: TP1 dinamik anapara → pyramid → trailing\n"
-            f"Komutlar alttaki butonlardan.",
-            with_keyboard=True,
-        )
+        if config.auto_buy_enabled:
+            log.warning("AUTO_BUY_ENABLED is ignored. This build is alert-only.")
+        await self.tg.run()
+        await self.tg.info("🟢 Alert-only memecoin bot başladı. Otomatik alım kapalı.", with_keyboard=True)
 
-        # Signal handlers
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
+            with suppress(NotImplementedError):
                 loop.add_signal_handler(sig, self._stop.set)
-            except NotImplementedError:
-                pass
 
         tasks = [
-            asyncio.create_task(self.scan_loop(), name="scan"),
-            asyncio.create_task(self.monitor_loop(), name="monitor"),
+            asyncio.create_task(self.scan_loop(), name="scan_loop"),
+            asyncio.create_task(self.watch_loop(), name="watch_loop"),
         ]
         await self._stop.wait()
-        log.info("shutting down...")
-        for t in tasks:
-            t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
 
-        try:
-            await self.tg.info("🛑 Bot durduruldu.")
-        except Exception:
-            pass
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with suppress(asyncio.CancelledError):
+                await task
+        await self.close()
+
+    async def close(self) -> None:
+        with suppress(Exception):
+            await self.tg.info("🔴 Bot kapanıyor.")
         await self.tg.stop()
+        await self.safety.close()
+        await self.jup.close()
         await self.ds.close()
         await self.pf.close()
-        await self.jup.close()
-        await self.safety.close()
 
 
-def main() -> None:
-    asyncio.run(Bot().run())
+async def main() -> None:
+    await Bot().run()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
