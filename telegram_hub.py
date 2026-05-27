@@ -7,7 +7,7 @@ from typing import Awaitable, Callable
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from candidate import Candidate
 from config import config
@@ -29,7 +29,7 @@ BOT_COMMANDS = [
 ]
 
 PERSISTENT_KEYBOARD = ReplyKeyboardMarkup(
-    [["/status", "/scan_stats"]],
+    [["/status", "/scan_stats"], ["/stats"]],
     resize_keyboard=True,
     is_persistent=True,
 )
@@ -48,13 +48,27 @@ class TelegramHub:
         self.app.add_handler(CommandHandler("start", self._start))
         self.app.add_handler(CommandHandler("status", self._status))
         self.app.add_handler(CommandHandler("scan_stats", self._scan_stats))
+        self.app.add_handler(CommandHandler("stats", self._scan_stats))
         self.app.add_handler(CommandHandler("ignore", self._ignore))
+        # Telegram reply-keyboard buttons sometimes arrive as plain text without a command entity.
+        # This fallback makes /status and /scan_stats buttons reliable on mobile clients.
+        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._text_router))
         self.app.add_handler(CallbackQueryHandler(self._callback))
         self._chat_id = config.telegram_chat_id
 
         self.status_cb: Callable[[], Awaitable[str]] | None = None
         self.scan_stats_cb: Callable[[], Awaitable[str]] | None = None
         self.ignore_cb: Callable[[str], Awaitable[str]] | None = None
+
+
+    async def _text_router(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        text = (update.message.text or "").strip().split()[0].lower()
+        if text in {"/status", "status"}:
+            await self._status(update, ctx)
+            return
+        if text in {"/scan_stats", "/stats", "scan_stats", "stats"}:
+            await self._scan_stats(update, ctx)
+            return
 
     async def _start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
@@ -72,7 +86,11 @@ class TelegramHub:
         await self._reply(update, text)
 
     async def _scan_stats(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        text = await self.scan_stats_cb() if self.scan_stats_cb else "Henüz tarama yok."
+        try:
+            text = await self.scan_stats_cb() if self.scan_stats_cb else "Henüz tarama yok."
+        except Exception as e:
+            log.exception("scan_stats command failed")
+            text = f"⚠️ Tarama istatistiği okunamadı: <code>{_esc(e)}</code>"
         await self._reply(update, text)
 
     async def _ignore(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
