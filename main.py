@@ -120,7 +120,7 @@ class Bot:
                     op = opportunity_score(c, safety_reason)
                     await self.tg.send_opportunity(c, op)
                     if config.watch_after_alert:
-                        self.watchlist.add_candidate(c)
+                        self.watchlist.add_candidate(c, op)
                     self.screener.mark_seen(c.base_token, passed=True)
                     await asyncio.sleep(0.5)
             except Exception:

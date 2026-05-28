@@ -264,29 +264,40 @@ class TelegramHub:
             await query.message.reply_text(f"⚠️ Bilinmeyen buton: <code>{_esc(data)}</code>", parse_mode=ParseMode.HTML)
 
     async def send_opportunity(self, c: Candidate, op: Opportunity) -> None:
-        reasons = "\n".join(f"• {_esc(x)}" for x in op.reasons) or "• Radar eşiğini geçti"
-        cautions = "\n".join(f"• {_esc(x)}" for x in op.cautions) or "• Memecoin riski yüksek; manuel onay şart"
+        reasons = "\n".join(f"✅ {_esc(x)}" for x in op.reasons) or "✅ Radar eşiğini geçti"
+        cautions = "\n".join(f"⚠️ {_esc(x)}" for x in op.cautions) or "⚠️ Memecoin riski yüksek; manuel onay şart"
         mode = getattr(op, "mode", "CONFIRMED SIGNAL")
-        emoji = "🟡" if mode == "EARLY WATCH" else "🟢"
-        title = "EARLY WATCH" if mode == "EARLY WATCH" else "ALIM ADAYI"
+        is_confirmed = mode == "CONFIRMED SIGNAL"
+
+        emoji = "🟢" if is_confirmed else "🟡"
+        title = "ALINABİLİR RADAR" if is_confirmed else "ERKEN RADAR / İZLEME"
+        amount_line = (
+            f"Önerilen alım: <b>{config.buy_amount_sol:.4f} SOL</b>\n"
+            if is_confirmed else
+            "Öneri: <b>Henüz izleme modu</b>\n"
+        )
 
         text = (
             f"{emoji} <b>{title}: ${_esc(c.base_symbol)}</b>\n\n"
+            f"{amount_line}"
             f"Opportunity: <code>{op.opportunity_score}/100</code>\n"
             f"Risk: <code>{op.risk_score}/100</code>\n"
             f"Exit: <code>{getattr(op, 'exit_score', 0)}/100</code>\n\n"
-            f"<b>Radara girme nedenleri</b>\n{reasons}\n\n"
+            f"<b>Neden radara girdi?</b>\n{reasons}\n\n"
             f"<b>Risk notları</b>\n{cautions}\n\n"
             f"Likidite: <code>${c.liquidity_usd:,.0f}</code>\n"
-            f"Hacim/Liq h1: <code>{(c.volume_h1 / max(c.liquidity_usd, 1)):.2f}</code>\n"
+            f"Hacim/Liq h1: <code>{(c.volume_h1 / max(c.liquidity_usd, 1)):.2f}x</code>\n"
             f"Tx h1: <code>{c.txns_h1}</code> | Buy: <code>{(c.buys_h1 / max(c.txns_h1, 1)):.0%}</code>\n"
             f"H1: <code>{c.price_change_h1:+.1f}%</code> | H6: <code>{c.price_change_h6:+.1f}%</code>\n"
             f"Mint: <code>{_esc(c.base_token)}</code>"
         )
-        buttons = [
-            [InlineKeyboardButton(f"🚀 AL {config.buy_amount_sol:.3f} SOL", callback_data=f"buy:{c.base_token}")],
+
+        buttons: list[list[InlineKeyboardButton]] = []
+        if is_confirmed:
+            buttons.append([InlineKeyboardButton(f"🚀 AL {config.buy_amount_sol:.3f} SOL", callback_data=f"buy:{c.base_token}")])
+        buttons.extend([
             [
-                InlineKeyboardButton("👁 İzlemede", callback_data="status"),
+                InlineKeyboardButton("👁 Takipte", callback_data="status"),
                 InlineKeyboardButton("📊 Scan Stats", callback_data="scan_stats"),
             ],
             [InlineKeyboardButton("DexScreener", url=c.url or f"https://dexscreener.com/solana/{c.pair_address}")],
@@ -294,7 +305,8 @@ class TelegramHub:
                 InlineKeyboardButton("Solscan", url=f"https://solscan.io/token/{c.base_token}"),
                 InlineKeyboardButton("🚫 Yoksay", callback_data=f"ignore:{c.base_token}"),
             ],
-        ]
+        ])
+
         await self.app.bot.send_message(
             chat_id=self._chat_id,
             text=text,
@@ -315,22 +327,39 @@ class TelegramHub:
 
     async def send_watch_warning(self, w: WatchWarning) -> None:
         reasons = "\n".join(f"• {_esc(x)}" for x in w.reasons)
-        text = (
-            f"⚠️ <b>${_esc(w.symbol)} FORMASYON BOZULUYOR</b>\n\n"
-            f"{reasons}\n\n"
-            f"Fiyat: <code>${w.price_usd:.8f}</code>\n"
-            f"Peak DD: <code>-{w.drawdown_pct:.1f}%</code>\n"
-            f"Likidite düşüşü: <code>-{w.liquidity_drop_pct:.1f}%</code>\n\n"
-            f"Mint: <code>{_esc(w.token_mint)}</code>"
-        )
-        buttons = [
-            [InlineKeyboardButton("🚨 Pozisyonu Kapat", callback_data=f"close:{w.token_mint}")],
-            [
-                InlineKeyboardButton("📊 Scan Stats", callback_data="scan_stats"),
-                InlineKeyboardButton("DexScreener", url=w.url or f"https://dexscreener.com/solana/{w.pair_address}"),
-            ],
-            [InlineKeyboardButton("🚫 Yoksay", callback_data=f"ignore:{w.token_mint}")],
-        ]
+        if getattr(w, "kind", "break") == "strength":
+            title = f"📈 <b>${_esc(w.symbol)} FORMASYON GÜÇLENİYOR</b>"
+            text = (
+                f"{title}\n\n"
+                f"{reasons}\n\n"
+                f"Fiyat: <code>${w.price_usd:.8f}</code>\n"
+                f"Peak DD: <code>-{w.drawdown_pct:.1f}%</code>\n"
+                f"Mint: <code>{_esc(w.token_mint)}</code>"
+            )
+            buttons = [
+                [InlineKeyboardButton(f"🚀 AL {config.buy_amount_sol:.3f} SOL", callback_data=f"buy:{w.token_mint}")],
+                [
+                    InlineKeyboardButton("DexScreener", url=w.url or f"https://dexscreener.com/solana/{w.pair_address}"),
+                    InlineKeyboardButton("🚫 Yoksay", callback_data=f"ignore:{w.token_mint}"),
+                ],
+            ]
+        else:
+            text = (
+                f"⚠️ <b>${_esc(w.symbol)} FORMASYON BOZULUYOR</b>\n\n"
+                f"{reasons}\n\n"
+                f"Fiyat: <code>${w.price_usd:.8f}</code>\n"
+                f"Peak DD: <code>-{w.drawdown_pct:.1f}%</code>\n"
+                f"Likidite düşüşü: <code>-{w.liquidity_drop_pct:.1f}%</code>\n\n"
+                f"Mint: <code>{_esc(w.token_mint)}</code>"
+            )
+            buttons = [
+                [InlineKeyboardButton("🚨 Pozisyonu Kapat", callback_data=f"close:{w.token_mint}")],
+                [
+                    InlineKeyboardButton("DexScreener", url=w.url or f"https://dexscreener.com/solana/{w.pair_address}"),
+                    InlineKeyboardButton("🚫 Yoksay", callback_data=f"ignore:{w.token_mint}"),
+                ],
+            ]
+
         await self.app.bot.send_message(
             chat_id=self._chat_id,
             text=text,

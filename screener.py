@@ -221,66 +221,25 @@ class Screener:
         total_passed = sum(x.passed for x in self._history)
         total_filter_fail = sum(x.filter_fail for x in self._history)
         total_fetched = sum(x.fetched for x in self._history)
+        last = recent[0]
+        last_early = len([x for x in last.passed_candidates if x.mode == "EARLY WATCH"])
+        last_confirmed = len([x for x in last.passed_candidates if x.mode == "CONFIRMED SIGNAL"])
 
         lines = [
-            f"🔍 <b>Son {len(recent)} tarama</b>",
-            f"Toplam fetched: <code>{total_fetched}</code> | "
-            f"filter fail: <code>{total_filter_fail}</code> | "
-            f"passed: <code>{total_passed}</code>",
+            "🔍 <b>Radar sağlık paneli</b>",
+            f"Son tarama: fetched=<code>{last.fetched}</code> | "
+            f"filter=<code>{last.filter_fail}</code> | "
+            f"passed=<code>{last.passed}</code>",
+            f"Son tarama Early/Alınabilir: 🟡 <code>{last_early}</code> / 🟢 <code>{last_confirmed}</code>",
+            f"Son {len(self._history)} tarama toplamı: fetched=<code>{total_fetched}</code> | "
+            f"filter fail=<code>{total_filter_fail}</code> | passed=<code>{total_passed}</code>",
+            "",
+            "Not: Radara giren coinler ayrı Telegram bildirimi olarak gönderilir ve otomatik izlemeye alınır.",
         ]
 
-        for s in recent:
-            age_min = (time.time() - s.ts) / 60
-            pass_rate = (s.passed / max(s.fetched, 1)) * 100
-            lines.append(
-                f"\n<i>{age_min:.0f}dk önce</i>\n"
-                f"  Kaynak: ds_profiles=<code>{s.src_ds_profiles}</code> "
-                f"boost=<code>{s.src_ds_boosted}</code> "
-                f"top=<code>{s.src_ds_top}</code> "
-                f"pump=<code>{s.src_pump}</code>\n"
-                f"  Unique: <code>{s.unique_mints}</code>  "
-                f"cooldown: <code>{s.on_cooldown}</code>  "
-                f"fetched: <code>{s.fetched}</code>\n"
-                f"  Cuts: no_pairs=<code>{s.no_pairs}</code> "
-                f"parse=<code>{s.parse_fail}</code> "
-                f"filter=<code>{s.filter_fail}</code>\n"
-                f"  → <b>passed: {s.passed}</b> "
-                f"(<code>{pass_rate:.1f}%</code>)"
-            )
-            if s.passed_candidates:
-                early = [x for x in s.passed_candidates if x.mode == "EARLY WATCH"]
-                confirmed = [x for x in s.passed_candidates if x.mode == "CONFIRMED SIGNAL"]
-                lines.append(
-                    f"  🟡 Early: <code>{len(early)}</code> | "
-                    f"🟢 Confirmed: <code>{len(confirmed)}</code>"
-                )
-
-                for pc in s.passed_candidates[:8]:
-                    icon = "🟢" if pc.mode == "CONFIRMED SIGNAL" else "🟡"
-                    lines.append(
-                        f"  {icon} <b>${_esc(pc.symbol)}</b> "
-                        f"O:<code>{pc.opportunity_score}</code> "
-                        f"R:<code>{pc.risk_score}</code> "
-                        f"X:<code>{pc.exit_score}</code> | "
-                        f"liq=<code>${pc.liquidity_usd:,.0f}</code> "
-                        f"tx=<code>{pc.txns_h1}</code> "
-                        f"buy=<code>{pc.buy_ratio_pct:.0f}%</code> "
-                        f"VL=<code>{pc.volume_liq_ratio:.2f}x</code> "
-                        f"h1=<code>{pc.h1:+.1f}%</code>"
-                    )
-                    if pc.url:
-                        lines.append(f"     <a href=\"{_esc(pc.url)}\">DexScreener</a>")
-                    if pc.reasons:
-                        reasons = "; ".join(_esc(r) for r in pc.reasons[:2])
-                        lines.append(f"     ✅ <i>{reasons}</i>")
-                    if pc.cautions:
-                        cautions = "; ".join(_esc(r) for r in pc.cautions[:2])
-                        lines.append(f"     ⚠️ <i>{cautions}</i>")
-                if len(s.passed_candidates) > 8:
-                    lines.append(f"  … +{len(s.passed_candidates) - 8} aday daha")
-
-            if s.sample_filter_reasons:
-                sample = "; ".join(_esc(x) for x in s.sample_filter_reasons[:3])
-                lines.append(f"  <i>Örnek red sebepleri: {sample}</i>")
+        if last.sample_filter_reasons:
+            sample = "; ".join(_esc(x) for x in last.sample_filter_reasons[:3])
+            lines.append(f"\n<i>Örnek red sebepleri: {sample}</i>")
 
         return "\n".join(lines)
+

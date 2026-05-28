@@ -29,6 +29,20 @@ class WatchedToken:
     warned: bool = False
     ignored: bool = False
 
+    # Radar V6 watch-state fields. Defaults keep old alerts.json compatible.
+    first_buy_ratio: float = 0.0          # fraction 0..1
+    first_volume_liq_ratio: float = 0.0
+    first_h1: float = 0.0
+    last_buy_ratio: float = 0.0
+    last_volume_liq_ratio: float = 0.0
+    last_h1: float = 0.0
+    mode: str = "UNKNOWN"
+    opportunity_score: int = 0
+    risk_score: int = 0
+    exit_score: int = 0
+    last_strength_alert_at: float = 0.0
+    last_break_alert_at: float = 0.0
+
 
 @dataclass
 class AlertEvent:
@@ -53,8 +67,17 @@ class Store:
             return cls()
         try:
             raw = json.loads(DB_PATH.read_text())
-            watched = [WatchedToken(**x) for x in raw.get("watched", [])]
-            alerts = [AlertEvent(**x) for x in raw.get("alerts", [])]
+            watched: list[WatchedToken] = []
+            for x in raw.get("watched", []):
+                # Backward-compatible load: ignore unknown keys, fill missing defaults.
+                allowed = WatchedToken.__dataclass_fields__
+                clean = {k: v for k, v in x.items() if k in allowed}
+                watched.append(WatchedToken(**clean))
+            alerts = []
+            for x in raw.get("alerts", []):
+                allowed = AlertEvent.__dataclass_fields__
+                clean = {k: v for k, v in x.items() if k in allowed}
+                alerts.append(AlertEvent(**clean))
             return cls(watched=watched, alerts=alerts)
         except Exception as e:
             log.error("storage load error: %s", e)
@@ -71,6 +94,12 @@ class Store:
     def upsert_watch(self, token: WatchedToken) -> None:
         for i, old in enumerate(self.watched):
             if old.base_token == token.base_token:
+                # Preserve already-triggered alert timestamps to avoid spam.
+                token.last_strength_alert_at = old.last_strength_alert_at
+                token.last_break_alert_at = old.last_break_alert_at
+                token.warned = old.warned
+                token.ignored = old.ignored
+                token.peak_price_usd = max(old.peak_price_usd, token.peak_price_usd)
                 self.watched[i] = token
                 self.save()
                 return
@@ -101,16 +130,18 @@ class Store:
         early = sum(1 for a in self.alerts if getattr(a, "mode", "") == "EARLY WATCH")
         confirmed = sum(1 for a in self.alerts if getattr(a, "mode", "") == "CONFIRMED SIGNAL")
         lines = [
-            "📡 <b>Alert-only bot durumu</b>",
+            "📡 <b>Memecoin radar durumu</b>",
             f"Aktif izleme: <code>{len(active)}</code>",
-            f"Toplam alert: <code>{len(self.alerts)}</code>",
-            f"Early/Confirmed: <code>{early}/{confirmed}</code>",
+            f"Toplam radar bildirimi: <code>{len(self.alerts)}</code>",
+            f"Early/Alınabilir: <code>{early}/{confirmed}</code>",
             f"Otomatik alım: <b>kapalı</b>",
         ]
-        for w in active[:10]:
+        for w in active[:8]:
             dd = ((w.peak_price_usd - w.last_price_usd) / max(w.peak_price_usd, 1e-12)) * 100
+            icon = "🟢" if w.mode == "CONFIRMED SIGNAL" else "🟡"
             lines.append(
-                f"• ${w.symbol} price=<code>${w.last_price_usd:.8f}</code> "
-                f"peak DD=<code>{dd:.1f}%</code>"
+                f"{icon} ${w.symbol} "
+                f"O:<code>{w.opportunity_score}</code> R:<code>{w.risk_score}</code> X:<code>{w.exit_score}</code> "
+                f"DD:<code>{dd:.1f}%</code>"
             )
         return "\n".join(lines)

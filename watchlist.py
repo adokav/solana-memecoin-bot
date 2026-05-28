@@ -1,4 +1,4 @@
-"""Post-alert watchlist: warns when the setup starts breaking down."""
+"""Post-alert watchlist: warns when the setup strengthens or breaks down."""
 from __future__ import annotations
 
 import time
@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from candidate import Candidate, parse as parse_candidate
 from config import config
 from dexscreener import DexScreener
-from filter import buy_ratio
+from filter import buy_ratio, volume_liquidity_ratio
+from opportunity import Opportunity
 from storage import Store, WatchedToken
 
 
@@ -21,6 +22,7 @@ class WatchWarning:
     price_usd: float
     drawdown_pct: float
     liquidity_drop_pct: float
+    kind: str = "break"  # "strength" or "break"
 
 
 class WatchList:
@@ -28,7 +30,9 @@ class WatchList:
         self.store = store
         self.ds = ds
 
-    def add_candidate(self, c: Candidate) -> None:
+    def add_candidate(self, c: Candidate, op: Opportunity | None = None) -> None:
+        br = buy_ratio(c)
+        vl = volume_liquidity_ratio(c)
         self.store.upsert_watch(WatchedToken(
             pair_address=c.pair_address,
             base_token=c.base_token,
@@ -40,6 +44,16 @@ class WatchList:
             last_price_usd=c.price_usd,
             last_liquidity_usd=c.liquidity_usd,
             alerted_at=time.time(),
+            first_buy_ratio=br,
+            first_volume_liq_ratio=vl,
+            first_h1=c.price_change_h1,
+            last_buy_ratio=br,
+            last_volume_liq_ratio=vl,
+            last_h1=c.price_change_h1,
+            mode=getattr(op, "mode", "UNKNOWN") if op else "UNKNOWN",
+            opportunity_score=getattr(op, "opportunity_score", 0) if op else 0,
+            risk_score=getattr(op, "risk_score", 0) if op else 0,
+            exit_score=getattr(op, "exit_score", 0) if op else 0,
         ))
 
     def ignore(self, token_mint: str) -> bool:
@@ -47,44 +61,94 @@ class WatchList:
 
     async def tick(self) -> list[WatchWarning]:
         warnings: list[WatchWarning] = []
+        now = time.time()
+
         for watched in self.store.active_watches():
             pair = await self.ds.pair("solana", watched.pair_address)
             c = parse_candidate(pair or {})
             if c is None:
                 continue
 
+            old_peak = watched.peak_price_usd
             if c.price_usd > watched.peak_price_usd:
                 watched.peak_price_usd = c.price_usd
 
-            watched.last_price_usd = c.price_usd
-            watched.last_liquidity_usd = c.liquidity_usd
-            watched.last_checked_at = time.time()
-
+            br = buy_ratio(c)
+            vl = volume_liquidity_ratio(c)
             drawdown = ((watched.peak_price_usd - c.price_usd) / max(watched.peak_price_usd, 1e-12)) * 100
             liq_drop = ((watched.first_liquidity_usd - c.liquidity_usd) / max(watched.first_liquidity_usd, 1.0)) * 100
-            reasons: list[str] = []
 
-            if drawdown >= config.warn_drawdown_from_peak_pct:
-                reasons.append(f"Peak'ten -{drawdown:.1f}% geri çekilme")
-            if liq_drop >= config.warn_liq_drop_pct:
-                reasons.append(f"Likidite -{liq_drop:.1f}% azaldı")
-            if buy_ratio(c) < config.warn_buy_ratio_below and c.txns_h1 >= 10:
-                reasons.append(f"Buy pressure zayıfladı ({buy_ratio(c):.0%})")
-            if c.price_change_h1 <= config.warn_price_h1_below:
-                reasons.append(f"H1 momentum negatif ({c.price_change_h1:.1f}%)")
+            # 1) Strengthening signal: not a buy command; it says the setup is improving.
+            strength_reasons: list[str] = []
+            price_gain = ((c.price_usd - watched.first_price_usd) / max(watched.first_price_usd, 1e-12)) * 100
+            liq_change = ((c.liquidity_usd - watched.first_liquidity_usd) / max(watched.first_liquidity_usd, 1.0)) * 100
 
-            if reasons and not watched.warned:
-                watched.warned = True
+            if c.price_usd > old_peak and price_gain >= 8:
+                strength_reasons.append(f"Yeni high denemesi; ilk radardan +{price_gain:.1f}%")
+            if br >= max(0.55, watched.first_buy_ratio + 0.06) and c.txns_h1 >= 20:
+                strength_reasons.append(f"Buy pressure güçlendi ({br:.0%})")
+            if vl >= max(0.50, watched.first_volume_liq_ratio * 1.25):
+                strength_reasons.append(f"Hacim/Likidite ivmesi arttı ({vl:.2f}x)")
+            if liq_change >= 12:
+                strength_reasons.append(f"Likidite büyüyor (+{liq_change:.1f}%)")
+            if c.price_change_h1 >= 15 and c.price_change_h1 > watched.first_h1:
+                strength_reasons.append(f"H1 momentum güçlendi ({c.price_change_h1:+.1f}%)")
+
+            # Send strength at most every 15 min per token and only with at least 2 confirmations.
+            if (
+                len(strength_reasons) >= 2
+                and (now - watched.last_strength_alert_at) >= 15 * 60
+                and drawdown < 18
+                and liq_drop < 15
+            ):
+                watched.last_strength_alert_at = now
                 warnings.append(WatchWarning(
                     token_mint=watched.base_token,
                     symbol=watched.symbol,
                     pair_address=watched.pair_address,
                     url=watched.url,
-                    reasons=reasons[:5],
+                    reasons=strength_reasons[:5],
                     price_usd=c.price_usd,
                     drawdown_pct=drawdown,
                     liquidity_drop_pct=liq_drop,
+                    kind="strength",
                 ))
+
+            # 2) Breakdown signal.
+            break_reasons: list[str] = []
+            if drawdown >= config.warn_drawdown_from_peak_pct:
+                break_reasons.append(f"Peak'ten -{drawdown:.1f}% geri çekilme")
+            if liq_drop >= config.warn_liq_drop_pct:
+                break_reasons.append(f"Likidite -{liq_drop:.1f}% azaldı")
+            if br < config.warn_buy_ratio_below and c.txns_h1 >= 10:
+                break_reasons.append(f"Buy pressure zayıfladı ({br:.0%})")
+            if c.price_change_h1 <= config.warn_price_h1_below:
+                break_reasons.append(f"H1 momentum negatife döndü ({c.price_change_h1:.1f}%)")
+            if vl < max(0.05, watched.first_volume_liq_ratio * 0.45):
+                break_reasons.append(f"Hacim/Likidite ivmesi söndü ({vl:.2f}x)")
+
+            # Send breakdown every 10 min max, not only once. Memecoin decay can happen fast.
+            if break_reasons and (now - watched.last_break_alert_at) >= 10 * 60:
+                watched.warned = True
+                watched.last_break_alert_at = now
+                warnings.append(WatchWarning(
+                    token_mint=watched.base_token,
+                    symbol=watched.symbol,
+                    pair_address=watched.pair_address,
+                    url=watched.url,
+                    reasons=break_reasons[:5],
+                    price_usd=c.price_usd,
+                    drawdown_pct=drawdown,
+                    liquidity_drop_pct=liq_drop,
+                    kind="break",
+                ))
+
+            watched.last_price_usd = c.price_usd
+            watched.last_liquidity_usd = c.liquidity_usd
+            watched.last_buy_ratio = br
+            watched.last_volume_liq_ratio = vl
+            watched.last_h1 = c.price_change_h1
+            watched.last_checked_at = now
 
         self.store.save()
         return warnings
