@@ -27,6 +27,63 @@ def _esc(value: object) -> str:
     return html.escape(str(value), quote=True)
 
 
+def _snapshot_passed_candidate(c: Candidate) -> PassedCandidateSnapshot:
+    """Create a human-readable scan snapshot without doing network safety checks."""
+    from opportunity import score as opportunity_score
+
+    op = opportunity_score(c, "hard filter ok")
+    liq = float(c.liquidity_usd or 0)
+    tx = int(c.txns_h1 or 0)
+    buy_ratio_pct = (c.buys_h1 / max(tx, 1)) * 100.0
+    vol_liq = float(c.volume_h1 or 0) / max(liq, 1.0)
+    return PassedCandidateSnapshot(
+        symbol=c.base_symbol or "?",
+        mint=c.base_token,
+        pair_address=c.pair_address,
+        url=c.url,
+        mode=op.mode,
+        opportunity_score=op.opportunity_score,
+        risk_score=op.risk_score,
+        exit_score=op.exit_score,
+        liquidity_usd=liq,
+        volume_h1=float(c.volume_h1 or 0),
+        volume_liq_ratio=vol_liq,
+        buy_ratio_pct=buy_ratio_pct,
+        txns_h1=tx,
+        sells_h1=int(c.sells_h1 or 0),
+        h1=float(c.price_change_h1 or 0),
+        h6=float(c.price_change_h6 or 0),
+        age_min=float(c.pair_age_h or 0) * 60.0,
+        reasons=op.reasons[:4],
+        cautions=op.cautions[:3],
+    )
+
+
+
+
+@dataclass
+class PassedCandidateSnapshot:
+    """Lightweight candidate snapshot for /scan_stats."""
+    symbol: str
+    mint: str
+    pair_address: str
+    url: str
+    mode: str
+    opportunity_score: int
+    risk_score: int
+    exit_score: int
+    liquidity_usd: float
+    volume_h1: float
+    volume_liq_ratio: float
+    buy_ratio_pct: float
+    txns_h1: int
+    sells_h1: int
+    h1: float
+    h6: float
+    age_min: float
+    reasons: list[str] = field(default_factory=list)
+    cautions: list[str] = field(default_factory=list)
+
 @dataclass
 class ScanResult:
     """Diagnostic — /scan_stats için."""
@@ -43,6 +100,7 @@ class ScanResult:
     filter_fail: int = 0
     passed: int = 0
     sample_filter_reasons: list[str] = field(default_factory=list)
+    passed_candidates: list[PassedCandidateSnapshot] = field(default_factory=list)
 
 
 class Screener:
@@ -132,6 +190,7 @@ class Screener:
                 continue
 
             candidates.append(c)
+            result.passed_candidates.append(_snapshot_passed_candidate(c))
 
         result.passed = len(candidates)
         self._history.append(result)
@@ -188,6 +247,38 @@ class Screener:
                 f"  → <b>passed: {s.passed}</b> "
                 f"(<code>{pass_rate:.1f}%</code>)"
             )
+            if s.passed_candidates:
+                early = [x for x in s.passed_candidates if x.mode == "EARLY WATCH"]
+                confirmed = [x for x in s.passed_candidates if x.mode == "CONFIRMED SIGNAL"]
+                lines.append(
+                    f"  🟡 Early: <code>{len(early)}</code> | "
+                    f"🟢 Confirmed: <code>{len(confirmed)}</code>"
+                )
+
+                for pc in s.passed_candidates[:8]:
+                    icon = "🟢" if pc.mode == "CONFIRMED SIGNAL" else "🟡"
+                    lines.append(
+                        f"  {icon} <b>${_esc(pc.symbol)}</b> "
+                        f"O:<code>{pc.opportunity_score}</code> "
+                        f"R:<code>{pc.risk_score}</code> "
+                        f"X:<code>{pc.exit_score}</code> | "
+                        f"liq=<code>${pc.liquidity_usd:,.0f}</code> "
+                        f"tx=<code>{pc.txns_h1}</code> "
+                        f"buy=<code>{pc.buy_ratio_pct:.0f}%</code> "
+                        f"VL=<code>{pc.volume_liq_ratio:.2f}x</code> "
+                        f"h1=<code>{pc.h1:+.1f}%</code>"
+                    )
+                    if pc.url:
+                        lines.append(f"     <a href=\"{_esc(pc.url)}\">DexScreener</a>")
+                    if pc.reasons:
+                        reasons = "; ".join(_esc(r) for r in pc.reasons[:2])
+                        lines.append(f"     ✅ <i>{reasons}</i>")
+                    if pc.cautions:
+                        cautions = "; ".join(_esc(r) for r in pc.cautions[:2])
+                        lines.append(f"     ⚠️ <i>{cautions}</i>")
+                if len(s.passed_candidates) > 8:
+                    lines.append(f"  … +{len(s.passed_candidates) - 8} aday daha")
+
             if s.sample_filter_reasons:
                 sample = "; ".join(_esc(x) for x in s.sample_filter_reasons[:3])
                 lines.append(f"  <i>Örnek red sebepleri: {sample}</i>")

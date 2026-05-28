@@ -118,8 +118,11 @@ class Config:
     # Loop
     scan_interval: int = field(default_factory=lambda: _int("SCAN_INTERVAL", 60))
     monitor_interval: int = field(default_factory=lambda: _int("MONITOR_INTERVAL", 20))
-    cooldown_hours_pass: float = field(default_factory=lambda: _float("COOLDOWN_HOURS_PASS", 6))
-    cooldown_hours_reject: float = field(default_factory=lambda: _float("COOLDOWN_HOURS_REJECT", 12))
+    cooldown_hours_pass: float = field(default_factory=lambda: _float("COOLDOWN_HOURS_PASS", 3))
+    # Reject cooldown must be short for memecoin radar. A 12h reject cooldown can make
+    # the bot blind after one scan because the same fresh tokens quickly reappear from
+    # DexScreener sources. Default: 0.15h ≈ 9 minutes.
+    cooldown_hours_reject: float = field(default_factory=lambda: _float("COOLDOWN_HOURS_REJECT", 0.15))
 
     # Sabitler
     sol_mint: str = "So11111111111111111111111111111111111111112"
