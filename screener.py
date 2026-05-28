@@ -229,12 +229,12 @@ class Screener:
             "🔍 <b>Radar sağlık paneli</b>",
             f"Son tarama: fetched=<code>{last.fetched}</code> | "
             f"filter=<code>{last.filter_fail}</code> | "
-            f"passed=<code>{last.passed}</code>",
+            f"aday=<code>{last.passed}</code>",
             f"Son tarama Early/Alınabilir: 🟡 <code>{last_early}</code> / 🟢 <code>{last_confirmed}</code>",
             f"Son {len(self._history)} tarama toplamı: fetched=<code>{total_fetched}</code> | "
-            f"filter fail=<code>{total_filter_fail}</code> | passed=<code>{total_passed}</code>",
+            f"filter fail=<code>{total_filter_fail}</code> | aday=<code>{total_passed}</code>",
             "",
-            "Not: Radara giren coinler ayrı Telegram bildirimi olarak gönderilir ve otomatik izlemeye alınır.",
+            "Not: Yalnızca skoru yeterli ALINABİLİR coinler ayrı Telegram bildirimi alır. Erken ama zayıf adaylar sessiz izlenebilir.",
         ]
 
         if last.sample_filter_reasons:

@@ -59,24 +59,30 @@ class Safety:
 
         # 1 & 2: mint + freeze authority revoke
         summary = await self._rugcheck_summary(mint)
+        authority_note = "ok"
         if summary is None:
-            reason = "rugcheck unreachable"
-            self._cache[mint] = (time.time(), False, reason)
-            return False, reason
-
-        risks = summary.get("risks") or []
-        risk_names = {(r.get("name") or "").lower() for r in risks}
-        # RugCheck'in raporladığı kritik authority risk'leri
-        if config.require_mint_revoked:
-            if any("mint authority" in n for n in risk_names):
-                reason = "mint authority not revoked"
+            # RugCheck bazen rate-limit/timeout verebilir. Bunu tek başına hard reject
+            # yapmak radarın körleşmesine yol açar. Jupiter roundtrip geçerse aday
+            # skorlanır ama risk notuna "authority unknown" olarak düşer.
+            if not config.safety_allow_rugcheck_unreachable:
+                reason = "rugcheck unreachable"
                 self._cache[mint] = (time.time(), False, reason)
                 return False, reason
-        if config.require_freeze_revoked:
-            if any("freeze authority" in n for n in risk_names):
-                reason = "freeze authority not revoked"
-                self._cache[mint] = (time.time(), False, reason)
-                return False, reason
+            authority_note = "authority unknown; rugcheck unreachable"
+        else:
+            risks = summary.get("risks") or []
+            risk_names = {(r.get("name") or "").lower() for r in risks}
+            # RugCheck'in raporladığı kritik authority risk'leri
+            if config.require_mint_revoked:
+                if any("mint authority" in n for n in risk_names):
+                    reason = "mint authority not revoked"
+                    self._cache[mint] = (time.time(), False, reason)
+                    return False, reason
+            if config.require_freeze_revoked:
+                if any("freeze authority" in n for n in risk_names):
+                    reason = "freeze authority not revoked"
+                    self._cache[mint] = (time.time(), False, reason)
+                    return False, reason
 
         # 3: honeypot sim — Jupiter roundtrip
         ok, hp_reason, loss_pct, impact = await self.jup.roundtrip_sim(mint)
@@ -84,5 +90,6 @@ class Safety:
             self._cache[mint] = (time.time(), False, f"honeypot: {hp_reason}")
             return False, f"honeypot: {hp_reason}"
 
-        self._cache[mint] = (time.time(), True, "ok")
-        return True, "ok"
+        passed_reason = "jupiter exit ok" if authority_note == "ok" else f"{authority_note}; jupiter exit ok"
+        self._cache[mint] = (time.time(), True, passed_reason)
+        return True, passed_reason

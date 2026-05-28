@@ -62,13 +62,13 @@ class Config:
     auto_buy_enabled: bool = field(default_factory=lambda: _bool("AUTO_BUY_ENABLED", False))
 
     # Fırsat filtresi: scam riskini azaltmak için eski MVP'ye göre daha sıkı defaultlar.
-    min_liq_usd: float = field(default_factory=lambda: _float("MIN_LIQ_USD", 8_000))
-    max_liq_usd: float = field(default_factory=lambda: _float("MAX_LIQ_USD", 350_000))
+    min_liq_usd: float = field(default_factory=lambda: _float("MIN_LIQ_USD", 5_000))
+    max_liq_usd: float = field(default_factory=lambda: _float("MAX_LIQ_USD", 500_000))
     min_age_h: float = field(default_factory=lambda: _float("MIN_AGE_H", 0.08))      # ~5 dk
-    max_age_h: float = field(default_factory=lambda: _float("MAX_AGE_H", 48))        # 2 gün
+    max_age_h: float = field(default_factory=lambda: _float("MAX_AGE_H", 72))        # 2 gün
     # Radar V2: early-watch alt eşikleri. Bu eşikler erken fırsatı kaçırmamak için kullanılır;
     # güçlü sinyal ayrımı opportunity.py içinde yapılır.
-    early_min_liq_usd: float = field(default_factory=lambda: _float("EARLY_MIN_LIQ_USD", 2_000))
+    early_min_liq_usd: float = field(default_factory=lambda: _float("EARLY_MIN_LIQ_USD", 1_500))
     early_min_age_h: float = field(default_factory=lambda: _float("EARLY_MIN_AGE_H", 0.03))  # ~2 dk
     early_min_txns_h1: int = field(default_factory=lambda: _int("EARLY_MIN_TXNS_H1", 10))
     early_min_volume_h1_usd: float = field(default_factory=lambda: _float("EARLY_MIN_VOLUME_H1_USD", 500))
@@ -76,21 +76,29 @@ class Config:
     early_min_volume_liq_ratio: float = field(default_factory=lambda: _float("EARLY_MIN_VOLUME_LIQ_RATIO", 0.05))
     min_txns_h1: int = field(default_factory=lambda: _int("MIN_TXNS_H1", 35))
     min_volume_h1_usd: float = field(default_factory=lambda: _float("MIN_VOLUME_H1_USD", 4_000))
-    min_volume_liq_ratio: float = field(default_factory=lambda: _float("MIN_VOLUME_LIQ_RATIO", 0.20))
-    max_volume_liq_ratio: float = field(default_factory=lambda: _float("MAX_VOLUME_LIQ_RATIO", 8.0))
+    min_volume_liq_ratio: float = field(default_factory=lambda: _float("MIN_VOLUME_LIQ_RATIO", 0.15))
+    max_volume_liq_ratio: float = field(default_factory=lambda: _float("MAX_VOLUME_LIQ_RATIO", 25.0))
     min_buy_ratio: float = field(default_factory=lambda: _float("MIN_BUY_RATIO", 0.48))
     max_buy_ratio: float = field(default_factory=lambda: _float("MAX_BUY_RATIO", 0.78))
     min_sells_h1: int = field(default_factory=lambda: _int("MIN_SELLS_H1", 3))
     min_price_h1: float = field(default_factory=lambda: _float("MIN_PRICE_H1", -18))
-    max_price_h1: float = field(default_factory=lambda: _float("MAX_PRICE_H1", 220))
+    max_price_h1: float = field(default_factory=lambda: _float("MAX_PRICE_H1", 500))
     min_price_h6: float = field(default_factory=lambda: _float("MIN_PRICE_H6", -35))
-    max_price_h6: float = field(default_factory=lambda: _float("MAX_PRICE_H6", 900))
+    max_price_h6: float = field(default_factory=lambda: _float("MAX_PRICE_H6", 1600))
 
     # Safety / rug bariyeri
     require_mint_revoked: bool = field(default_factory=lambda: _bool("REQUIRE_MINT_REVOKED", True))
     require_freeze_revoked: bool = field(default_factory=lambda: _bool("REQUIRE_FREEZE_REVOKED", True))
     max_roundtrip_loss_pct: float = field(default_factory=lambda: _float("MAX_ROUNDTRIP_LOSS_PCT", 18))
     max_price_impact_pct: float = field(default_factory=lambda: _float("MAX_PRICE_IMPACT_PCT", 7))
+
+    # Alert policy: hard filter sadece bariz çöp/scam gürültüsünü eler.
+    # Gerçek "alınabilir" kararı skor eşikleriyle verilir.
+    min_alert_opportunity_score: int = field(default_factory=lambda: _int("MIN_ALERT_OPPORTUNITY_SCORE", 70))
+    max_alert_risk_score: int = field(default_factory=lambda: _int("MAX_ALERT_RISK_SCORE", 62))
+    min_alert_exit_score: int = field(default_factory=lambda: _int("MIN_ALERT_EXIT_SCORE", 55))
+    silent_watch_early: bool = field(default_factory=lambda: _bool("SILENT_WATCH_EARLY", True))
+    safety_allow_rugcheck_unreachable: bool = field(default_factory=lambda: _bool("SAFETY_ALLOW_RUGCHECK_UNREACHABLE", True))
     quote_test_sol: float = field(default_factory=lambda: _float("QUOTE_TEST_SOL", 0.01))
 
     # Jupiter buy/sell settings

@@ -1,9 +1,8 @@
+"""Hard noise/scam gate for the memecoin radar.
 
-"""Candidate filters for Radar V2.
-
-This layer is only the hard scam/noise gate. It intentionally allows some
-promising early tokens through as EARLY WATCH. Strong buy-candidate separation
-is handled by opportunity.score().
+Bu katman "alınır/alınmaz" kararı vermez.
+Sadece matematiksel olarak ölçülemeyen veya çıkışı zayıf bariz çöpleri eler.
+Asıl seçim opportunity.score() içindeki olasılıksal skorlama ile yapılır.
 """
 from __future__ import annotations
 
@@ -20,23 +19,26 @@ def volume_liquidity_ratio(c: Candidate) -> float:
 
 
 def passes(c: Candidate) -> tuple[bool, str]:
+    # 1) Trade edilebilir quote.
     if c.quote_symbol.upper() not in {"SOL", "WSOL", "USDC"}:
         return False, f"quote not SOL/USDC: {c.quote_symbol}"
 
+    # 2) Geçerli fiyat/likidite. Likidite alt sınırı erken fırsatı kaçırmamak için düşük;
+    # alım sinyali daha sonra exit_score ile ayrılır.
     if c.price_usd <= 0:
         return False, "invalid price"
-
-    # Early-watch lower bounds: do not miss very early potential setups.
     if c.liquidity_usd < config.early_min_liq_usd:
         return False, f"liq ${c.liquidity_usd:.0f} < early ${config.early_min_liq_usd:.0f}"
     if c.liquidity_usd > config.max_liq_usd:
         return False, f"liq ${c.liquidity_usd:.0f} > ${config.max_liq_usd:.0f}"
 
+    # 3) Çok yeni tokenlarda veri yoktur; çok eski tokenlar radarın edge penceresi dışında kalır.
     if c.pair_age_h < config.early_min_age_h:
         return False, f"too fresh: {c.pair_age_h:.2f}h"
     if c.pair_age_h > config.max_age_h:
         return False, f"too old: {c.pair_age_h:.1f}h"
 
+    # 4) Minimum organik aktivite. Tek tx/tek cüzdan pump'larını ele.
     if c.txns_h1 < config.early_min_txns_h1:
         return False, f"low early activity: {c.txns_h1} tx/h"
     if c.volume_h1 < config.early_min_volume_h1_usd:
@@ -45,25 +47,24 @@ def passes(c: Candidate) -> tuple[bool, str]:
         return False, f"too few sells: {c.sells_h1}"
 
     ratio = buy_ratio(c)
-    if ratio < 0.40:
+    # Çok zayıf akış veya satışsız tek taraflı akış bariz risk.
+    if ratio < 0.38:
         return False, f"weak buy ratio: {ratio:.0%}"
-    if ratio > 0.92 and c.sells_h1 < 3:
+    if ratio > 0.94 and c.sells_h1 < 3:
         return False, f"one-sided flow: buy ratio {ratio:.0%}, sells {c.sells_h1}"
 
     vlr = volume_liquidity_ratio(c)
     if vlr < config.early_min_volume_liq_ratio:
         return False, f"low early volume/liquidity: {vlr:.2f}"
+    # Eskiden 8x üstü hard reject idi; bu bazı erken hot coinleri kaçırıyordu.
+    # Artık sadece aşırı anormal/noisy durumları eliyoruz; geri kalanı risk skoruna bırakıyoruz.
     if vlr > config.max_volume_liq_ratio:
-        return False, f"wash/noisy volume-liquidity: {vlr:.1f}"
+        return False, f"extreme volume/liquidity: {vlr:.1f}"
 
+    # Aşırı çöküş hard reject; aşırı pump ise skor katmanında risk olarak ele alınır.
     if c.price_change_h1 < config.min_price_h1:
         return False, f"h1 crashing: {c.price_change_h1:.1f}%"
-    if c.price_change_h1 > config.max_price_h1:
-        return False, f"overextended h1: {c.price_change_h1:.1f}%"
-
     if c.price_change_h6 < config.min_price_h6:
         return False, f"h6 weak: {c.price_change_h6:.1f}%"
-    if c.price_change_h6 > config.max_price_h6:
-        return False, f"overextended h6: {c.price_change_h6:.1f}%"
 
     return True, "ok"

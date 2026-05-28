@@ -20,7 +20,7 @@ from solders.keypair import Keypair
 from config import config
 from dexscreener import DexScreener
 from jupiter import Jupiter, JupiterError, LAMPORTS_PER_SOL
-from opportunity import score as opportunity_score
+from opportunity import is_actionable, score as opportunity_score
 from pumpfun import PumpFun
 from safety import Safety
 from screener import Screener
@@ -118,11 +118,24 @@ class Bot:
                         continue
 
                     op = opportunity_score(c, safety_reason)
-                    await self.tg.send_opportunity(c, op)
-                    if config.watch_after_alert:
-                        self.watchlist.add_candidate(c, op)
-                    self.screener.mark_seen(c.base_token, passed=True)
-                    await asyncio.sleep(0.5)
+
+                    # Alert policy:
+                    # - Alınabilir radar: Telegram bildirimi + AL butonu.
+                    # - Early watch: İstenirse sessiz izleme; güçlenirse watch_loop haber verir.
+                    if is_actionable(op):
+                        await self.tg.send_opportunity(c, op)
+                        if config.watch_after_alert:
+                            self.watchlist.add_candidate(c, op)
+                        self.screener.mark_seen(c.base_token, passed=True)
+                        await asyncio.sleep(0.5)
+                    else:
+                        if config.silent_watch_early and config.watch_after_alert:
+                            self.watchlist.add_candidate(c, op)
+                        self.screener.mark_seen(c.base_token, passed=False)
+                        log.info(
+                            "watch-only %s: O=%s R=%s X=%s mode=%s",
+                            c.base_symbol, op.opportunity_score, op.risk_score, op.exit_score, op.mode
+                        )
             except Exception:
                 log.exception("scan loop error")
 
