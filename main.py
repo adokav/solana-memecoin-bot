@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import html
 import signal
 from contextlib import suppress
 
@@ -55,6 +56,7 @@ class Bot:
         self.watchlist = WatchList(self.store, self.ds)
         self.tg = TelegramHub(self.store, close_handler=self.quick_close if self.keypair else None, buy_handler=self.quick_buy if self.keypair else None, radar_handler=self.manual_radar)
         self._stop = asyncio.Event()
+        self._last_eval_rows: list[dict[str, object]] = []
 
         self.tg.status_cb = self.status_text
         self.tg.scan_stats_cb = self.scan_stats_text
@@ -65,7 +67,29 @@ class Bot:
         return self.store.status_text() + f"\nHızlı kapatma: <b>{close_state}</b>"
 
     async def scan_stats_text(self) -> str:
-        return self.screener.format_scan_stats()
+        text = self.screener.format_scan_stats()
+        if not self._last_eval_rows:
+            return text
+
+        actionable = [r for r in self._last_eval_rows if r.get("decision") == "ALINABİLİR"]
+        watch = [r for r in self._last_eval_rows if r.get("decision") == "İZLE"]
+        avoid = [r for r in self._last_eval_rows if r.get("decision") == "UZAK DUR"]
+
+        best = max(self._last_eval_rows, key=lambda r: int(r.get("edge", 0)), default=None)
+        extra = [
+            "",
+            "<b>Son skor değerlendirmesi</b>",
+            f"Alınabilir/İzle/Uzak: 🟢 <code>{len(actionable)}</code> / 🟡 <code>{len(watch)}</code> / 🔴 <code>{len(avoid)}</code>",
+        ]
+        if best:
+            extra.extend([
+                f"En yakın aday: <b>${html.escape(str(best.get('symbol','?')))}</b> "
+                f"Karar=<b>{html.escape(str(best.get('decision','?')))}</b> "
+                f"Edge=<code>{best.get('edge',0)}</code> Conf=<code>{best.get('confidence',0)}</code> "
+                f"Risk=<code>{best.get('risk',0)}</code>",
+                f"Eksik/Not: <i>{html.escape(str(best.get('note','')))}</i>",
+            ])
+        return text + "\n".join(extra)
 
     async def ignore_token(self, token_mint: str) -> str:
         ok = self.watchlist.ignore(token_mint.strip())
@@ -84,7 +108,7 @@ class Bot:
 
     async def manual_radar(self, token_mint: str) -> str:
         """Manual token analysis. Adds DEVAM/IZLE tokens to watchlist."""
-        token_mint = token_mint.strip()
+        token_mint = token_mint.strip().strip("<>").strip().replace("`", "")
         c = await self._best_candidate_for_token(token_mint)
         if c is None:
             return (
@@ -186,18 +210,54 @@ class Bot:
             log.exception("quick close error")
             return False, f"Satış hatası: <code>{e}</code>"
 
+
+    def _opportunity_note(self, op) -> str:
+        """Explain why an otherwise interesting candidate did/did not become actionable."""
+        missing: list[str] = []
+        if getattr(op, "edge_score", 0) < config.min_alert_edge_score:
+            missing.append(f"Edge {getattr(op, 'edge_score', 0)}<{config.min_alert_edge_score}")
+        if getattr(op, "confidence_score", 0) < config.min_alert_confidence_score:
+            missing.append(f"Conf {getattr(op, 'confidence_score', 0)}<{config.min_alert_confidence_score}")
+        if getattr(op, "survival_score", 0) < config.min_alert_survival_score:
+            missing.append(f"Survival {getattr(op, 'survival_score', 0)}<{config.min_alert_survival_score}")
+        if getattr(op, "exit_score", 0) < config.min_alert_exit_score:
+            missing.append(f"Exit {getattr(op, 'exit_score', 0)}<{config.min_alert_exit_score}")
+        if getattr(op, "risk_score", 0) > config.max_alert_risk_score:
+            missing.append(f"Risk {getattr(op, 'risk_score', 0)}>{config.max_alert_risk_score}")
+        return ", ".join(missing[:4]) or "Eşiklere yakın; canlı takipte"
+
     async def scan_loop(self) -> None:
         while not self._stop.is_set():
             try:
                 candidates, _ = await self.screener.scan()
+                cycle_rows: list[dict[str, object]] = []
                 for c in candidates:
                     ok, safety_reason = await self.safety.check(c.base_token)
                     if not ok:
+                        op = opportunity_score(c, f"safety fail: {safety_reason}")
+                        cycle_rows.append({
+                            "symbol": c.base_symbol,
+                            "mint": c.base_token,
+                            "decision": "UZAK DUR",
+                            "edge": getattr(op, "edge_score", 0),
+                            "confidence": getattr(op, "confidence_score", 0),
+                            "risk": getattr(op, "risk_score", 0),
+                            "note": f"safety reject: {safety_reason}",
+                        })
                         self.screener.mark_seen(c.base_token, passed=False)
                         log.info("safety reject %s: %s", c.base_symbol, safety_reason)
                         continue
 
                     op = opportunity_score(c, safety_reason)
+                    cycle_rows.append({
+                        "symbol": c.base_symbol,
+                        "mint": c.base_token,
+                        "decision": getattr(op, "decision", "İZLE"),
+                        "edge": getattr(op, "edge_score", 0),
+                        "confidence": getattr(op, "confidence_score", 0),
+                        "risk": getattr(op, "risk_score", 0),
+                        "note": self._opportunity_note(op),
+                    })
 
                     # Alert policy:
                     # - Alınabilir radar: Telegram bildirimi + AL butonu.
@@ -207,15 +267,21 @@ class Bot:
                         if config.watch_after_alert:
                             self.watchlist.add_candidate(c, op)
                         self.screener.mark_seen(c.base_token, passed=True)
+                        log.info(
+                            "ACTIONABLE %s: edge=%s conf=%s survival=%s exit=%s risk=%s",
+                            c.base_symbol, op.edge_score, op.confidence_score, op.survival_score, op.exit_score, op.risk_score
+                        )
                         await asyncio.sleep(0.5)
                     else:
-                        if config.silent_watch_early and config.watch_after_alert:
+                        if config.silent_watch_early and config.watch_after_alert and getattr(op, "decision", "") == "İZLE":
                             self.watchlist.add_candidate(c, op)
                         self.screener.mark_seen(c.base_token, passed=False)
                         log.info(
-                            "watch-only %s: O=%s R=%s X=%s mode=%s",
-                            c.base_symbol, op.opportunity_score, op.risk_score, op.exit_score, op.mode
+                            "watch-only %s: decision=%s edge=%s conf=%s risk=%s note=%s",
+                            c.base_symbol, getattr(op, "decision", "?"), getattr(op, "edge_score", 0),
+                            getattr(op, "confidence_score", 0), getattr(op, "risk_score", 0), self._opportunity_note(op)
                         )
+                self._last_eval_rows = sorted(cycle_rows, key=lambda r: int(r.get("edge", 0)), reverse=True)[:8]
             except Exception:
                 log.exception("scan loop error")
 

@@ -1,18 +1,11 @@
 """Probability-first scoring engine for the Solana memecoin radar.
 
-Bu motorun amacı "iyi görünen metrikleri" kör şekilde ödüllendirmek değil;
-vahşi memecoin piyasasında üç soruyu birlikte yanıtlamaktır:
-
-1) Survival: Bu coin rug/honeypot/ölü akış olmadan hayatta kalabilir mi?
-2) Expansion: Akış büyüyor mu, yoksa sadece anlık gürültü mü?
-3) Exit: Girersek çıkmak matematiksel olarak mümkün mü?
-4) Timing: Erkenlik/olgunluk penceresi risk-getiri açısından nerede?
-
-Notlar:
-- DexScreener tek snapshot verdiği için "growth" metrikleri proxy olarak hesaplanır.
-- Watchlist katmanı zaman içindeki delta'ları izleyerek daha gerçek ivme üretir.
-- Bu dosya eski Opportunity alanlarını korur; Telegram/watchlist eski kodla kırılmaz.
-"""""
+V11 yaklaşımı:
+- Hard filter sadece bariz veri/likidite çöpünü eler.
+- Alınabilir kararını burada, olasılıksal skorlar verir.
+- "İyi görünen" tek metrikleri kör ödüllendirmez; özellikle wash/crowded/late riskini cezalandırır.
+- Eski alanlar korunur: opportunity_score, risk_score, exit_score, mode, reasons, cautions.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -28,7 +21,7 @@ Decision = Literal["ALINABİLİR", "İZLE", "UZAK DUR"]
 
 @dataclass
 class Opportunity:
-    # Backward-compatible public fields.
+    # Backward-compatible fields.
     opportunity_score: int
     risk_score: int
     exit_score: int
@@ -36,7 +29,7 @@ class Opportunity:
     reasons: list[str]
     cautions: list[str]
 
-    # V10 probability model fields.
+    # Probability model fields.
     survival_score: int = 0
     expansion_score: int = 0
     timing_score: int = 0
@@ -50,17 +43,21 @@ def _clamp(value: float, lo: int = 0, hi: int = 100) -> int:
     return int(max(lo, min(hi, round(value))))
 
 
-def _bell(x: float, ideal_low: float, ideal_high: float, min_x: float, max_x: float) -> float:
-    """0..100 score for being inside an ideal interval, with linear decay outside."""
+def _interval_score(x: float, ideal_low: float, ideal_high: float, floor_low: float, floor_high: float) -> float:
+    """0..100 score: ideal aralık 100; dışarıda lineer düşer."""
     if ideal_low <= x <= ideal_high:
         return 100.0
     if x < ideal_low:
-        if x <= min_x:
+        if x <= floor_low:
             return 0.0
-        return 100.0 * (x - min_x) / max(ideal_low - min_x, 1e-9)
-    if x >= max_x:
+        return 100.0 * (x - floor_low) / max(ideal_low - floor_low, 1e-9)
+    if x >= floor_high:
         return 0.0
-    return 100.0 * (max_x - x) / max(max_x - ideal_high, 1e-9)
+    return 100.0 * (floor_high - x) / max(floor_high - ideal_high, 1e-9)
+
+
+def _safe_ratio(num: float, den: float, default: float = 0.0) -> float:
+    return default if den <= 0 else num / den
 
 
 def _risk_label(risk: int) -> str:
@@ -76,11 +73,13 @@ def _risk_label(risk: int) -> str:
 def score(c: Candidate, safety_reason: str = "safety ok") -> Opportunity:
     liq = float(c.liquidity_usd or 0)
     tx = int(c.txns_h1 or 0)
-    sells = int(c.sells_h1 or 0)
     buys = int(c.buys_h1 or 0)
-    buy_ratio = buys / max(tx, 1)           # 0..1
+    sells = int(c.sells_h1 or 0)
+    buy_ratio = _safe_ratio(buys, max(tx, 1))
+    sell_ratio = _safe_ratio(sells, max(tx, 1))
     buy_ratio_pct = buy_ratio * 100.0
-    vol_liq = float(c.volume_h1 or 0) / max(liq, 1.0)
+    vol_h1 = float(c.volume_h1 or 0)
+    vol_liq = _safe_ratio(vol_h1, max(liq, 1.0))
     h1 = float(c.price_change_h1 or 0)
     h6 = float(c.price_change_h6 or 0)
     age_min = float(c.pair_age_h or 0) * 60.0
@@ -90,215 +89,174 @@ def score(c: Candidate, safety_reason: str = "safety ok") -> Opportunity:
     cautions: list[str] = []
 
     # ------------------------------------------------------------------
-    # SURVIVAL: Rug/ölüm ihtimalini azaltan sinyaller.
+    # Market microstructure risk flags.
     # ------------------------------------------------------------------
-    survival = 45.0
+    wash_risk = 0.0
+    crowd_risk = 0.0
 
-    # Likidite: çok düşük exit'i öldürür; çok yüksek erken çarpanı azaltır ama survival'a iyi gelir.
-    if liq < 1_500:
-        survival -= 35
-        cautions.append(f"Likidite çok düşük: ${liq:,.0f}")
-    elif liq < 5_000:
-        survival += 2
-        cautions.append(f"Likidite erken/düşük: ${liq:,.0f}")
-    elif liq <= 150_000:
-        survival += 22
-        reasons.append(f"Likidite survival için yeterli: ${liq:,.0f}")
-    elif liq <= 500_000:
-        survival += 18
-        reasons.append(f"Likidite güçlü: ${liq:,.0f}")
-    else:
-        survival += 8
-        cautions.append(f"Likidite yüksek; erken çarpan azalabilir: ${liq:,.0f}")
+    if tx >= 800 and vol_liq < 1.2:
+        wash_risk += 28
+        cautions.append(f"Tx çok yüksek ama hacim/likidite düşük; mikro-wash riski ({tx}/h, {vol_liq:.2f}x)")
+    elif tx >= 1200:
+        wash_risk += 18
+        cautions.append(f"Aşırı yoğun akış; bot/crowded trade riski ({tx}/h)")
 
-    # Sell activity: satış yoksa honeypot veya tek taraflı manipülasyon riski.
-    if sells <= 0 and tx >= 8:
-        survival -= 35
-        cautions.append("Sell akışı görünmüyor; honeypot/exit riski")
-    elif sells < 3:
-        survival -= 8
-        cautions.append(f"Sell örneklemi düşük: {sells}/h")
-    else:
-        survival += 12
-        reasons.append(f"Sell akışı mevcut: {sells}/h")
+    if vol_liq > 12:
+        wash_risk += 24
+        cautions.append(f"Aşırı hacim/likidite; wash veya dağıtım riski ({vol_liq:.1f}x)")
+    elif vol_liq > 7:
+        wash_risk += 10
+        cautions.append(f"Hacim çok sıcak; sürdürülebilirlik izlenmeli ({vol_liq:.1f}x)")
 
-    # Buy/sell dengesi: %55-75 organik erken akış için daha sağlıklı.
-    if 0.54 <= buy_ratio <= 0.76:
-        survival += 14
-        reasons.append(f"Buy pressure dengeli: %{buy_ratio_pct:.0f}")
-    elif 0.76 < buy_ratio <= 0.88:
-        survival += 2
-        cautions.append(f"Buy ratio yüksek; kalabalık trade riski: %{buy_ratio_pct:.0f}")
-    elif buy_ratio > 0.88:
-        survival -= 22
+    if buy_ratio > 0.88:
+        wash_risk += 22
         cautions.append(f"Aşırı tek taraflı buy flow: %{buy_ratio_pct:.0f}")
-    elif buy_ratio < 0.42:
-        survival -= 18
-        cautions.append(f"Buy pressure zayıf: %{buy_ratio_pct:.0f}")
-    else:
-        survival -= 2
+    if sells <= 0 and tx >= 8:
+        wash_risk += 35
+        cautions.append("Sell akışı yok; honeypot/exit riski")
+    if h1 > 300:
+        crowd_risk += 24
+        cautions.append(f"H1 parabolik; tepeden giriş riski: %{h1:+.1f}")
+    elif h1 > 160:
+        crowd_risk += 12
+        cautions.append(f"H1 hızlı koşmuş: %{h1:+.1f}")
+    if h6 > 700:
+        crowd_risk += 18
+        cautions.append(f"H6 aşırı şişmiş: %{h6:+.1f}")
+    if age_min > 360:
+        crowd_risk += min(25, (age_min - 360) / 60 * 3)
+        cautions.append(f"Erkenlik avantajı azalıyor: {age_min/60:.1f} saat")
 
-    # Safety reason: RugCheck/Jupiter authority/exit bilgisi.
+    # ------------------------------------------------------------------
+    # Survival: tokenın ölmeden/çıkışı kilitlemeden yaşama ihtimali.
+    # ------------------------------------------------------------------
+    liq_survival = _interval_score(liq, 8_000, 220_000, 1_000, 900_000)
+    sell_survival = _interval_score(sells, 3, 140, 0, 500)
+    buy_balance = _interval_score(buy_ratio, 0.54, 0.76, 0.35, 0.94)
+    age_survival = _interval_score(age_min, 8, 360, 1, 4_320)
+
+    survival = (
+        0.35 * liq_survival
+        + 0.25 * sell_survival
+        + 0.25 * buy_balance
+        + 0.15 * age_survival
+    )
+
     if "honeypot" in safety_text or "no token->sol" in safety_text or "no route" in safety_text:
-        survival -= 40
+        survival -= 45
         cautions.append(str(safety_reason))
     elif "mint authority" in safety_text or "freeze authority" in safety_text:
         survival -= 35
         cautions.append(str(safety_reason))
     elif "unknown" in safety_text or "unreachable" in safety_text:
-        survival -= 10
+        survival -= 8
         cautions.append(str(safety_reason))
     elif safety_reason and safety_reason != "ok":
-        survival += 8
+        survival += 6
         reasons.append(str(safety_reason))
 
-    # ------------------------------------------------------------------
-    # EXPANSION: Büyüme/ilgi potansiyeli. Seviye değil, erken sıcaklık proxy'leri.
-    # ------------------------------------------------------------------
-    expansion = 35.0
+    survival -= 0.55 * wash_risk
+    survival_i = _clamp(survival)
 
-    # Tx örneklemi: 30-250/h ideal; çok yüksek ise crowded/wash riskiyle kısılır.
-    if tx < 10:
-        expansion -= 22
-        cautions.append(f"Tx örneklemi zayıf: {tx}/h")
-    elif tx < 30:
-        expansion += 8
-        reasons.append(f"Erken aktivite var: {tx}/h")
-    elif tx <= 250:
-        expansion += 24
-        reasons.append(f"Organik işlem yoğunluğu: {tx}/h")
-    else:
-        expansion += 16
-        cautions.append(f"Çok yoğun akış; kalabalık trade olabilir: {tx}/h")
-
-    # Volume/Liquidity: 1.2-6x hot ama hâlâ makul. >12x wash/rotation riski.
-    if vol_liq < 0.15:
-        expansion -= 18
-        cautions.append(f"Hacim/Likidite zayıf: {vol_liq:.2f}x")
-    elif vol_liq < 1.2:
-        expansion += 8
-        reasons.append(f"Hacim/Likidite oluşuyor: {vol_liq:.2f}x")
-    elif vol_liq <= 6:
-        expansion += 24
-        reasons.append(f"Hacim/Likidite canlı: {vol_liq:.2f}x")
-    elif vol_liq <= 12:
-        expansion += 12
-        cautions.append(f"Hacim çok sıcak; wash riski izlenmeli: {vol_liq:.1f}x")
-    else:
-        expansion -= 8
-        cautions.append(f"Aşırı hacim/likidite: {vol_liq:.1f}x")
-
-    # Momentum: h1 pozitifliği iyi, parabolik aşırılık riskli.
-    if -5 <= h1 < 10:
-        expansion += 5
-        reasons.append(f"H1 toparlanma/sakin bölge: %{h1:+.1f}")
-    elif 10 <= h1 <= 140:
-        expansion += 20
-        reasons.append(f"H1 momentum sağlıklı: %{h1:+.1f}")
-    elif 140 < h1 <= 300:
-        expansion += 8
-        cautions.append(f"H1 hızlı koşmuş: %{h1:+.1f}")
-    elif h1 > 300:
-        expansion -= 15
-        cautions.append(f"H1 parabolik/aşırı: %{h1:+.1f}")
-    else:
-        expansion -= 12
-        cautions.append(f"H1 zayıf: %{h1:+.1f}")
-
-    if h6 > 800:
-        expansion -= 10
-        cautions.append(f"H6 aşırı şişmiş: %{h6:+.1f}")
-    elif 0 <= h6 <= 400:
-        expansion += 4
-
-    # ------------------------------------------------------------------
-    # EXIT: Girildikten sonra çıkılabilirlik.
-    # ------------------------------------------------------------------
-    exit_score = 35.0
-
-    if liq < 3_000:
-        exit_score -= 25
-    elif liq < 8_000:
-        exit_score += 4
-    elif liq <= 250_000:
-        exit_score += 24
-    else:
-        exit_score += 18
-
-    # Sell ve tx örneklemi exit'in gerçek zamanlı kanıtı.
+    if liq >= 5_000:
+        reasons.append(f"Likidite survival için yeterli: ${liq:,.0f}")
     if sells >= 3:
-        exit_score += 16
-    elif sells >= 1:
-        exit_score += 5
-    else:
-        exit_score -= 25
+        reasons.append(f"Satış akışı mevcut: {sells}/h")
+    if 0.54 <= buy_ratio <= 0.76:
+        reasons.append(f"Buy/sell dengesi sağlıklı: %{buy_ratio_pct:.0f}")
 
-    if tx >= 30:
-        exit_score += 8
-    if buy_ratio > 0.9:
-        exit_score -= 18
-    if vol_liq > 12:
-        exit_score -= 12
+    # ------------------------------------------------------------------
+    # Expansion: büyüme potansiyeli. Salt kalabalık değil, sürdürülebilir sıcaklık.
+    # ------------------------------------------------------------------
+    tx_heat = _interval_score(tx, 25, 450, 5, 1600)
+    vol_heat = _interval_score(vol_liq, 0.6, 5.5, 0.05, 18)
+    momentum_heat = _interval_score(h1, 8, 150, -25, 420)
+    h6_heat = _interval_score(h6, -10, 420, -80, 1_200)
 
+    expansion = 0.32 * tx_heat + 0.33 * vol_heat + 0.25 * momentum_heat + 0.10 * h6_heat
+    expansion -= 0.35 * wash_risk
+    expansion -= 0.20 * crowd_risk
+    expansion_i = _clamp(expansion)
+
+    if tx >= 25:
+        reasons.append(f"İşlem akışı var: {tx}/h")
+    if 0.6 <= vol_liq <= 5.5:
+        reasons.append(f"Hacim/Likidite aktif: {vol_liq:.2f}x")
+    if 8 <= h1 <= 150:
+        reasons.append(f"H1 momentum sağlıklı: %{h1:+.1f}")
+    elif -8 <= h1 < 8:
+        reasons.append(f"H1 sakin/toparlanma bölgesi: %{h1:+.1f}")
+
+    # ------------------------------------------------------------------
+    # Exit: girildiğinde çıkılabilirlik.
+    # ------------------------------------------------------------------
+    liq_exit = _interval_score(liq, 10_000, 280_000, 1_000, 1_000_000)
+    sells_exit = _interval_score(sells, 4, 180, 0, 600)
+    route_exit = 65.0
     if "jupiter exit ok" in safety_text or "exit ok" in safety_text:
-        exit_score += 16
+        route_exit = 100.0
         reasons.append("Jupiter çıkış testi geçti")
     elif "unknown" in safety_text or "unreachable" in safety_text:
-        exit_score -= 6
-    elif "honeypot" in safety_text:
-        exit_score -= 45
+        route_exit = 50.0
+    elif "honeypot" in safety_text or "no route" in safety_text:
+        route_exit = 0.0
 
-    # ------------------------------------------------------------------
-    # TIMING: Çok erken/verisiz değil, çok geç/dağıtım değil.
-    # ------------------------------------------------------------------
-    # Ideal: 12 dk - 4 saat. Early-watch için 3-12 dk kabul ama confidence düşük.
-    timing = _bell(age_min, ideal_low=12, ideal_high=240, min_x=2, max_x=4_320)
-    if 3 <= age_min < 12:
-        reasons.append(f"Çok erken radar penceresi: {age_min:.0f} dk")
-        cautions.append("Erken faz; metrikler hızlı bozulabilir")
-    elif 12 <= age_min <= 240:
-        reasons.append(f"İdeal erkenlik penceresi: {age_min:.0f} dk")
-    elif age_min > 240:
-        cautions.append(f"Erkenlik avantajı azalıyor: {age_min/60:.1f} saat")
-
-    # ------------------------------------------------------------------
-    # CONFIDENCE: Verinin karar almak için yeterliliği. Düşük confidence'da edge sinyali bastırılır.
-    # ------------------------------------------------------------------
-    confidence = 20.0
-    confidence += _bell(tx, 35, 220, 5, 800) * 0.35
-    confidence += _bell(liq, 8_000, 180_000, 1_000, 750_000) * 0.30
-    confidence += _bell(age_min, 15, 360, 2, 4_320) * 0.20
-    confidence += _bell(sells, 3, 90, 0, 250) * 0.15
-
-    survival_i = _clamp(survival)
-    expansion_i = _clamp(expansion)
+    exit_score = 0.45 * liq_exit + 0.30 * sells_exit + 0.25 * route_exit
+    exit_score -= 0.30 * wash_risk
+    if buy_ratio > 0.90:
+        exit_score -= 15
     exit_i = _clamp(exit_score)
+
+    # ------------------------------------------------------------------
+    # Timing: fırsat penceresi. İdeal: 10 dk - 4 saat, 4-8 saat izlenebilir.
+    # ------------------------------------------------------------------
+    timing = _interval_score(age_min, 10, 240, 2, 1_440)
+    if 3 <= age_min < 10:
+        reasons.append(f"Çok erken radar penceresi: {age_min:.0f} dk")
+        cautions.append("Erken faz; veri güveni düşük")
+    elif 10 <= age_min <= 240:
+        reasons.append(f"İdeal erkenlik penceresi: {age_min:.0f} dk")
     timing_i = _clamp(timing)
+
+    # ------------------------------------------------------------------
+    # Confidence: kararın istatistiksel güveni. Wash/crowded riski güveni düşürür.
+    # ------------------------------------------------------------------
+    confidence = (
+        0.30 * _interval_score(tx, 35, 500, 8, 1800)
+        + 0.30 * _interval_score(liq, 8_000, 220_000, 1_000, 900_000)
+        + 0.20 * _interval_score(sells, 4, 180, 0, 600)
+        + 0.20 * _interval_score(age_min, 12, 360, 2, 1_440)
+    )
+    confidence -= 0.35 * wash_risk
+    confidence -= 0.20 * crowd_risk
     confidence_i = _clamp(confidence)
 
-    # Weighted radar score: hayatta kalma ve çıkış skoru "alpha"dan önce gelir.
-    radar = (
-        0.35 * survival_i
-        + 0.30 * expansion_i
-        + 0.20 * exit_i
-        + 0.15 * timing_i
+    # ------------------------------------------------------------------
+    # Risk / Edge / Radar.
+    # ------------------------------------------------------------------
+    risk = (
+        0.42 * (100 - survival_i)
+        + 0.22 * (100 - exit_i)
+        + 0.18 * wash_risk
+        + 0.13 * crowd_risk
+        + 0.05 * max(0, 45 - confidence_i)
     )
+    risk_i = _clamp(risk)
 
-    # Edge: expansion + exit + timing - risk. Confidence düşükse edge bastırılır.
-    risk_i = _clamp(100 - survival_i + max(0, 50 - exit_i) * 0.35 + max(0, 45 - confidence_i) * 0.25)
-    raw_edge = 0.38 * expansion_i + 0.27 * exit_i + 0.20 * timing_i + 0.15 * survival_i - 0.28 * risk_i
-    edge = _clamp(raw_edge + 20)
-    if confidence_i < 45:
-        edge = _clamp(edge - (45 - confidence_i) * 0.45)
-
+    radar = 0.35 * survival_i + 0.30 * expansion_i + 0.20 * exit_i + 0.15 * timing_i
     radar_i = _clamp(radar)
 
-    # Backward-compatible opportunity: now maps to expansion/timing blend.
+    # Edge = yükselme ihtimali + çıkış + timing - risk; confidence düşükse edge bastırılır.
+    edge = 0.36 * expansion_i + 0.25 * exit_i + 0.20 * timing_i + 0.19 * survival_i - 0.34 * risk_i
+    if confidence_i < 55:
+        edge -= (55 - confidence_i) * 0.35
+    edge_i = _clamp(edge)
+
     opportunity_i = _clamp(0.55 * expansion_i + 0.25 * timing_i + 0.20 * confidence_i)
 
-    # Decision gates. Survival/exit floors prevent pretty pump metrics from becoming "buyable".
+    # Decision gates. Not every "candidate" is actionable.
     actionable = (
-        edge >= config.min_alert_edge_score
+        edge_i >= config.min_alert_edge_score
         and confidence_i >= config.min_alert_confidence_score
         and survival_i >= config.min_alert_survival_score
         and exit_i >= config.min_alert_exit_score
@@ -306,24 +264,25 @@ def score(c: Candidate, safety_reason: str = "safety ok") -> Opportunity:
         and liq >= config.min_liq_usd
         and tx >= config.min_txns_h1
         and sells >= config.min_sells_h1
-        and 0.45 <= buy_ratio <= 0.88
+        and config.min_buy_ratio <= buy_ratio <= 0.88
     )
 
     if actionable:
         decision: Decision = "ALINABİLİR"
         mode: SignalMode = "CONFIRMED SIGNAL"
-    elif edge >= 55 and survival_i >= 45 and exit_i >= 35:
+    elif edge_i >= 48 and survival_i >= 42 and exit_i >= 32:
         decision = "İZLE"
         mode = "EARLY WATCH"
     else:
         decision = "UZAK DUR"
         mode = "EARLY WATCH"
 
-    # High-level rationale.
-    reasons.insert(0, f"Edge {edge}/100, Confidence {confidence_i}/100")
+    reasons.insert(0, f"Edge {edge_i}/100, Confidence {confidence_i}/100")
     reasons.insert(1, f"Survival {survival_i}/100, Expansion {expansion_i}/100, Exit {exit_i}/100")
     if decision != "ALINABİLİR":
         cautions.insert(0, f"Karar {decision}; risk {_risk_label(risk_i)} veya doğrulama eksik")
+    if wash_risk >= 20:
+        cautions.insert(1, f"Wash/crowded risk skoru yüksek: {_clamp(wash_risk)}/100")
 
     if not reasons:
         reasons.append("Ölçülebilir radar verisi oluştu")
@@ -341,7 +300,7 @@ def score(c: Candidate, safety_reason: str = "safety ok") -> Opportunity:
         expansion_score=expansion_i,
         timing_score=timing_i,
         confidence_score=confidence_i,
-        edge_score=edge,
+        edge_score=edge_i,
         radar_score=radar_i,
         decision=decision,
     )

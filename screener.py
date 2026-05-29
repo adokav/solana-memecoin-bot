@@ -230,11 +230,11 @@ class Screener:
             f"Son tarama: fetched=<code>{last.fetched}</code> | "
             f"filter=<code>{last.filter_fail}</code> | "
             f"aday=<code>{last.passed}</code>",
-            f"Son tarama Early/Alınabilir: 🟡 <code>{last_early}</code> / 🟢 <code>{last_confirmed}</code>",
+            f"Son tarama ön skor Early/Confirmed: 🟡 <code>{last_early}</code> / 🟢 <code>{last_confirmed}</code>",
             f"Son {len(self._history)} tarama toplamı: fetched=<code>{total_fetched}</code> | "
             f"filter fail=<code>{total_filter_fail}</code> | aday=<code>{total_passed}</code>",
             "",
-            "Not: Yalnızca skoru yeterli ALINABİLİR coinler ayrı Telegram bildirimi alır. Erken ama zayıf adaylar sessiz izlenebilir.",
+            "Not: Bu panel sağlık özetidir. Gerçek ALINABİLİR kararı safety + V11 Edge/Confidence skorundan sonra ayrı Telegram bildirimi olarak gelir.",
         ]
 
         if last.sample_filter_reasons:

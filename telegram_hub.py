@@ -69,6 +69,38 @@ def _norm_button_text(value: str | None) -> str:
     return aliases.get(compact, compact)
 
 
+def _extract_token_from_text(text: str | None, commands: tuple[str, ...] = ("radar", "analyze")) -> str:
+    """Extract a mint from /radar or /analyze messages.
+
+    Telegram users often paste as:
+      /radar
+      <mint>
+    or include angle brackets/backticks. This helper accepts all of them.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    # Normalize common wrappers and invisible chars.
+    raw = raw.replace("\u200b", "").replace("\ufeff", "")
+    raw = raw.replace("`", " ").replace("<", " ").replace(">", " ")
+    parts = raw.replace("\n", " ").replace("\t", " ").split()
+    cleaned: list[str] = []
+    command_set = {c.lower().lstrip("/") for c in commands}
+    for part in parts:
+        p = part.strip().strip(",;:()[]{}")
+        if not p:
+            continue
+        low = p.lower().split("@", 1)[0].lstrip("/")
+        if low in command_set:
+            continue
+        cleaned.append(p)
+    # Prefer a Solana-like mint length; otherwise first non-command token.
+    for p in cleaned:
+        if 32 <= len(p) <= 60 and all(ch.isalnum() for ch in p):
+            return p
+    return cleaned[0] if cleaned else ""
+
+
 class TelegramHub:
     def __init__(self, store: Store, close_handler: CloseHandler | None = None, buy_handler: BuyHandler | None = None, radar_handler: RadarHandler | None = None) -> None:
         self.store = store
@@ -111,6 +143,14 @@ class TelegramHub:
             raise ApplicationHandlerStop
         if action == "scan_stats":
             await self._scan_stats(update, ctx)
+            raise ApplicationHandlerStop
+
+        if action in {"radar", "analyze"} or update.message.text.strip().lower().startswith(("/radar", "/analyze")):
+            await self._radar(update, ctx)
+            raise ApplicationHandlerStop
+
+        if action == "ignore" or update.message.text.strip().lower().startswith("/ignore"):
+            await self._ignore(update, ctx)
             raise ApplicationHandlerStop
 
     async def _start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -164,9 +204,12 @@ class TelegramHub:
         await self._reply(update, text)
 
     async def _radar(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        token = " ".join(ctx.args).strip()
+        token = " ".join(getattr(ctx, "args", []) or []).strip()
+        if not token and update.message:
+            token = _extract_token_from_text(update.message.text, ("radar", "analyze"))
+        token = _extract_token_from_text(token, ("radar", "analyze")).strip()
         if not token:
-            await self._reply(update, "Kullanım: <code>/radar &lt;token_mint&gt;</code> veya <code>/analyze &lt;token_mint&gt;</code>")
+            await self._reply(update, "Kullanım: <code>/radar &lt;token_mint&gt;</code> veya <code>/analyze &lt;token_mint&gt;</code>\n\nÖrnek: <code>/radar CcZShPVDmsVfWVToqiM2zKSgfeXJjn38XkG1TuLtkpump</code>")
             return
         if not self.radar_handler:
             await self._reply(update, "Manuel radar callback hazır değil.")
@@ -178,8 +221,23 @@ class TelegramHub:
             text = f"⚠️ Manuel radar analizi yapılamadı: <code>{_esc(e)}</code>"
         await self._reply(update, text)
 
+        # Manual radar action panel. Even if the analysis says "İZLE", the user can
+        # prepare a Telegram-confirmed buy or close flow without copying the mint again.
+        if update.message and token:
+            await update.message.reply_text(
+                "Aksiyon paneli:",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"🚀 AL {config.buy_amount_sol:.3f} SOL", callback_data=f"buy:{token}")],
+                    [InlineKeyboardButton("🚨 Pozisyonu Kapat", callback_data=f"close:{token}")],
+                    [InlineKeyboardButton("Solscan", url=f"https://solscan.io/token/{token}")],
+                ]),
+            )
+
     async def _ignore(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        token = " ".join(ctx.args).strip()
+        token = " ".join(getattr(ctx, "args", []) or []).strip()
+        if not token and update.message:
+            token = _extract_token_from_text(update.message.text, ("ignore",))
+        token = _extract_token_from_text(token, ("ignore",)).strip()
         if not token:
             await self._reply(update, "Kullanım: <code>/ignore &lt;token_mint&gt;</code>")
             return
