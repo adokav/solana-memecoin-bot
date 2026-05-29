@@ -25,12 +25,15 @@ log = logging.getLogger(__name__)
 
 CloseHandler = Callable[[str], Awaitable[tuple[bool, str]]]
 BuyHandler = Callable[[str], Awaitable[tuple[bool, str]]]
+RadarHandler = Callable[[str], Awaitable[str]]
 
 
 BOT_COMMANDS = [
     ("start", "Bot durumu ve komutlar"),
     ("status", "Bot durumu"),
     ("scan_stats", "Son tarama istatistikleri"),
+    ("radar", "Manuel token analizi: /radar <mint>"),
+    ("analyze", "Manuel token analizi: /analyze <mint>"),
     ("ignore", "Token izlemeyi bırak: /ignore <mint>"),
 ]
 
@@ -67,10 +70,11 @@ def _norm_button_text(value: str | None) -> str:
 
 
 class TelegramHub:
-    def __init__(self, store: Store, close_handler: CloseHandler | None = None, buy_handler: BuyHandler | None = None) -> None:
+    def __init__(self, store: Store, close_handler: CloseHandler | None = None, buy_handler: BuyHandler | None = None, radar_handler: RadarHandler | None = None) -> None:
         self.store = store
         self.close_handler = close_handler
         self.buy_handler = buy_handler
+        self.radar_handler = radar_handler
         self.app: Application = Application.builder().token(config.telegram_token).build()
 
         # Universal text router MUST be first. Telegram reply-keyboard buttons can be sent
@@ -81,6 +85,7 @@ class TelegramHub:
         self.app.add_handler(CommandHandler("start", self._start), group=0)
         self.app.add_handler(CommandHandler("status", self._status), group=0)
         self.app.add_handler(CommandHandler(["scan_stats", "scan_status", "stats"], self._scan_stats), group=0)
+        self.app.add_handler(CommandHandler(["radar", "analyze"], self._radar), group=0)
         self.app.add_handler(CommandHandler("ignore", self._ignore), group=0)
 
         # Inline buttons.
@@ -156,6 +161,21 @@ class TelegramHub:
         except Exception as e:
             log.exception("scan_stats failed")
             text = f"⚠️ Tarama istatistiği okunamadı: <code>{_esc(e)}</code>"
+        await self._reply(update, text)
+
+    async def _radar(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        token = " ".join(ctx.args).strip()
+        if not token:
+            await self._reply(update, "Kullanım: <code>/radar &lt;token_mint&gt;</code> veya <code>/analyze &lt;token_mint&gt;</code>")
+            return
+        if not self.radar_handler:
+            await self._reply(update, "Manuel radar callback hazır değil.")
+            return
+        try:
+            text = await self.radar_handler(token)
+        except Exception as e:
+            log.exception("manual radar failed")
+            text = f"⚠️ Manuel radar analizi yapılamadı: <code>{_esc(e)}</code>"
         await self._reply(update, text)
 
     async def _ignore(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -280,9 +300,15 @@ class TelegramHub:
         text = (
             f"{emoji} <b>{title}: ${_esc(c.base_symbol)}</b>\n\n"
             f"{amount_line}"
-            f"Opportunity: <code>{op.opportunity_score}/100</code>\n"
-            f"Risk: <code>{op.risk_score}/100</code>\n"
-            f"Exit: <code>{getattr(op, 'exit_score', 0)}/100</code>\n\n"
+            f"Karar: <b>{getattr(op, 'decision', 'İZLE')}</b>\n"
+            f"Radar: <code>{getattr(op, 'radar_score', op.opportunity_score)}/100</code> | "
+            f"Edge: <code>{getattr(op, 'edge_score', 0)}/100</code> | "
+            f"Confidence: <code>{getattr(op, 'confidence_score', 0)}/100</code>\n"
+            f"Survival: <code>{getattr(op, 'survival_score', 0)}/100</code> | "
+            f"Expansion: <code>{getattr(op, 'expansion_score', op.opportunity_score)}/100</code> | "
+            f"Exit: <code>{getattr(op, 'exit_score', 0)}/100</code> | "
+            f"Timing: <code>{getattr(op, 'timing_score', 0)}/100</code>\n"
+            f"Risk: <code>{op.risk_score}/100</code>\n\n"
             f"<b>Neden radara girdi?</b>\n{reasons}\n\n"
             f"<b>Risk notları</b>\n{cautions}\n\n"
             f"Likidite: <code>${c.liquidity_usd:,.0f}</code>\n"
@@ -322,6 +348,13 @@ class TelegramHub:
             opportunity_score=op.opportunity_score,
             risk_score=op.risk_score,
             exit_score=getattr(op, "exit_score", 0),
+            survival_score=getattr(op, "survival_score", 0),
+            expansion_score=getattr(op, "expansion_score", 0),
+            timing_score=getattr(op, "timing_score", 0),
+            confidence_score=getattr(op, "confidence_score", 0),
+            edge_score=getattr(op, "edge_score", 0),
+            radar_score=getattr(op, "radar_score", 0),
+            decision=getattr(op, "decision", "İZLE"),
             mode=getattr(op, "mode", "UNKNOWN"),
         ))
 

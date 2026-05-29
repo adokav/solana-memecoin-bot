@@ -97,6 +97,12 @@ class Config:
     min_alert_opportunity_score: int = field(default_factory=lambda: _int("MIN_ALERT_OPPORTUNITY_SCORE", 70))
     max_alert_risk_score: int = field(default_factory=lambda: _int("MAX_ALERT_RISK_SCORE", 62))
     min_alert_exit_score: int = field(default_factory=lambda: _int("MIN_ALERT_EXIT_SCORE", 55))
+    # V10 probability scoring gates. These are deliberately stricter than raw
+    # opportunity: buyable alerts must be survivable, exit-able and statistically
+    # credible, not merely "pumping".
+    min_alert_edge_score: int = field(default_factory=lambda: _int("MIN_ALERT_EDGE_SCORE", 68))
+    min_alert_confidence_score: int = field(default_factory=lambda: _int("MIN_ALERT_CONFIDENCE_SCORE", 55))
+    min_alert_survival_score: int = field(default_factory=lambda: _int("MIN_ALERT_SURVIVAL_SCORE", 58))
     silent_watch_early: bool = field(default_factory=lambda: _bool("SILENT_WATCH_EARLY", True))
     safety_allow_rugcheck_unreachable: bool = field(default_factory=lambda: _bool("SAFETY_ALLOW_RUGCHECK_UNREACHABLE", True))
     quote_test_sol: float = field(default_factory=lambda: _float("QUOTE_TEST_SOL", 0.01))

@@ -159,6 +159,13 @@ class Jupiter:
                 continue
         return total
 
+    async def sol_balance(self) -> int:
+        """Wallet SOL balance in lamports."""
+        if self.kp is None:
+            raise JupiterError("wallet keypair is required")
+        resp = await self.rpc.get_balance(self.kp.pubkey())
+        return int(resp.value or 0)
+
     async def sell_all(self, token_mint: str) -> tuple[str, int, int]:
         amount = await self.token_balance_raw(token_mint)
         if amount <= 0:

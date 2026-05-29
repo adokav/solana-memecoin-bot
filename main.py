@@ -17,6 +17,7 @@ from contextlib import suppress
 import base58
 from solders.keypair import Keypair
 
+from candidate import parse as parse_candidate
 from config import config
 from dexscreener import DexScreener
 from jupiter import Jupiter, JupiterError, LAMPORTS_PER_SOL
@@ -52,7 +53,7 @@ class Bot:
         self.safety = Safety(self.jup)
         self.screener = Screener(self.ds, self.pf)
         self.watchlist = WatchList(self.store, self.ds)
-        self.tg = TelegramHub(self.store, close_handler=self.quick_close if self.keypair else None, buy_handler=self.quick_buy if self.keypair else None)
+        self.tg = TelegramHub(self.store, close_handler=self.quick_close if self.keypair else None, buy_handler=self.quick_buy if self.keypair else None, radar_handler=self.manual_radar)
         self._stop = asyncio.Event()
 
         self.tg.status_cb = self.status_text
@@ -70,16 +71,82 @@ class Bot:
         ok = self.watchlist.ignore(token_mint.strip())
         return "🚫 Token izleme listesinden çıkarıldı." if ok else "Token izleme listesinde bulunamadı."
 
+    async def _best_candidate_for_token(self, token_mint: str):
+        """Fetch the most liquid Solana pair for a manually supplied mint/symbol."""
+        pairs = await self.ds.pairs_for_token("solana", token_mint)
+        if not pairs:
+            pairs = await self.ds.search(token_mint)
+        candidates = [parse_candidate(p) for p in pairs]
+        candidates = [c for c in candidates if c is not None and c.base_token]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda c: c.liquidity_usd)
+
+    async def manual_radar(self, token_mint: str) -> str:
+        """Manual token analysis. Adds DEVAM/IZLE tokens to watchlist."""
+        token_mint = token_mint.strip()
+        c = await self._best_candidate_for_token(token_mint)
+        if c is None:
+            return (
+                "❌ <b>MANUEL RADAR</b>\n\n"
+                f"<code>{token_mint}</code> için DexScreener üzerinde Solana pair bulunamadı.\n"
+                "Karar: <b>UZAK DUR / veri yok</b>"
+            )
+
+        ok, safety_reason = await self.safety.check(c.base_token)
+        op = opportunity_score(c, safety_reason if ok else f"safety fail: {safety_reason}")
+
+        # Manual radar is intentionally softer than auto alerts:
+        # it evaluates probability, explains risk, and watches if the setup is not clearly toxic.
+        decision = "UZAK DUR"
+        if ok and getattr(op, "decision", "") == "ALINABİLİR":
+            decision = "DEVAM"
+        elif ok and getattr(op, "decision", "") == "İZLE":
+            decision = "İZLE"
+        elif ok and op.exit_score >= 35 and op.risk_score <= 82:
+            decision = "İZLE"
+        else:
+            decision = "UZAK DUR"
+
+        if decision in {"DEVAM", "İZLE"}:
+            self.watchlist.add_candidate(c, op)
+            follow_line = "👁 <b>Takibe alındı.</b> Formasyon bozulursa gerekçeli uyarı göndereceğim."
+        else:
+            follow_line = "⛔ <b>Takibe alınmadı.</b> Risk/exit profili zayıf."
+
+        reasons = "\n".join(f"✅ {x}" for x in op.reasons[:6]) or "✅ Ölçülebilir veri var"
+        cautions = "\n".join(f"⚠️ {x}" for x in op.cautions[:6]) or "⚠️ Memecoin riski yüksek"
+
+        return (
+            f"🔍 <b>MANUEL RADAR ANALİZİ: ${c.base_symbol}</b>\n\n"
+            f"Karar: <b>{decision}</b>\n"
+            f"Radar: <code>{getattr(op, 'radar_score', op.opportunity_score)}/100</code> | Edge: <code>{getattr(op, 'edge_score', 0)}/100</code>\n"
+            f"Survival: <code>{getattr(op, 'survival_score', 0)}/100</code> | Expansion: <code>{getattr(op, 'expansion_score', op.opportunity_score)}/100</code>\n"
+            f"Exit: <code>{op.exit_score}/100</code> | Timing: <code>{getattr(op, 'timing_score', 0)}/100</code> | Confidence: <code>{getattr(op, 'confidence_score', 0)}/100</code>\n"
+            f"Risk: <code>{op.risk_score}/100</code>\n\n"
+            f"<b>Devam gerekçeleri</b>\n{reasons}\n\n"
+            f"<b>Riskler</b>\n{cautions}\n\n"
+            f"Likidite: <code>${c.liquidity_usd:,.0f}</code> | Tx h1: <code>{c.txns_h1}</code> | Buy: <code>{(c.buys_h1/max(c.txns_h1,1)):.0%}</code>\n"
+            f"Hacim/Liq: <code>{(c.volume_h1/max(c.liquidity_usd,1)):.2f}x</code> | H1: <code>{c.price_change_h1:+.1f}%</code>\n"
+            f"Mint: <code>{c.base_token}</code>\n"
+            f"<a href=\"{c.url or ('https://dexscreener.com/solana/' + c.pair_address)}\">DexScreener</a>\n\n"
+            f"{follow_line}"
+        )
+
     async def quick_buy(self, token_mint: str) -> tuple[bool, str]:
         if not self.keypair:
             return False, "Alım pasif: WALLET_PRIVATE_KEY tanımlı değil."
         try:
             sig, lamports, out_raw = await self.jup.buy(token_mint, config.buy_amount_sol)
             sol = lamports / LAMPORTS_PER_SOL
+            watched = self.store.find_watch(token_mint)
+            self.store.record_buy(token_mint, watched.symbol if watched else "?", sol, out_raw, sig)
+            bal_lamports = await self.jup.sol_balance()
             return True, (
                 "Alım emri gönderildi.\n"
                 f"Harcanan SOL: <code>{sol:.5f}</code>\n"
                 f"Tahmini token raw: <code>{out_raw}</code>\n"
+                f"Güncel SOL bakiye: <code>{bal_lamports / LAMPORTS_PER_SOL:.5f}</code>\n"
                 f"https://solscan.io/tx/{sig}"
             )
         except JupiterError as e:
@@ -94,10 +161,23 @@ class Bot:
         try:
             sig, sold_raw, out_lamports = await self.jup.sell_all(token_mint)
             sol = out_lamports / LAMPORTS_PER_SOL
+            pos = self.store.record_close(token_mint, sol, sig)
+            bal_lamports = await self.jup.sol_balance()
+            pnl_line = "PnL: <code>giriş maliyeti kaydı yok</code>"
+            if pos and pos.entry_sol > 0:
+                pnl = sol - pos.entry_sol
+                pnl_pct = (pnl / pos.entry_sol) * 100
+                pnl_line = f"PnL: <code>{pnl:+.5f} SOL ({pnl_pct:+.1f}%)</code>"
+            watched = self.store.find_watch(token_mint)
+            if watched:
+                watched.ignored = True
+                self.store.save()
             return True, (
-                "Satış emri gönderildi.\n"
-                f"Token raw: <code>{sold_raw}</code>\n"
-                f"Tahmini SOL: <code>{sol:.5f}</code>\n"
+                "Pozisyon kapatma emri gönderildi.\n"
+                f"Satılan token raw: <code>{sold_raw}</code>\n"
+                f"Çıkan SOL: <code>{sol:.5f}</code>\n"
+                f"{pnl_line}\n"
+                f"Güncel SOL bakiye: <code>{bal_lamports / LAMPORTS_PER_SOL:.5f}</code>\n"
                 f"https://solscan.io/tx/{sig}"
             )
         except JupiterError as e:

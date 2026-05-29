@@ -8,7 +8,7 @@ from candidate import Candidate, parse as parse_candidate
 from config import config
 from dexscreener import DexScreener
 from filter import buy_ratio, volume_liquidity_ratio
-from opportunity import Opportunity
+from opportunity import Opportunity, score as opportunity_score
 from storage import Store, WatchedToken
 
 
@@ -54,6 +54,13 @@ class WatchList:
             opportunity_score=getattr(op, "opportunity_score", 0) if op else 0,
             risk_score=getattr(op, "risk_score", 0) if op else 0,
             exit_score=getattr(op, "exit_score", 0) if op else 0,
+            survival_score=getattr(op, "survival_score", 0) if op else 0,
+            expansion_score=getattr(op, "expansion_score", 0) if op else 0,
+            timing_score=getattr(op, "timing_score", 0) if op else 0,
+            confidence_score=getattr(op, "confidence_score", 0) if op else 0,
+            edge_score=getattr(op, "edge_score", 0) if op else 0,
+            radar_score=getattr(op, "radar_score", 0) if op else 0,
+            decision=getattr(op, "decision", "İZLE") if op else "İZLE",
         ))
 
     def ignore(self, token_mint: str) -> bool:
@@ -75,6 +82,10 @@ class WatchList:
 
             br = buy_ratio(c)
             vl = volume_liquidity_ratio(c)
+            current_op = opportunity_score(c, "watchlist rescore")
+            previous_edge = int(getattr(watched, "edge_score", 0) or 0)
+            previous_conf = int(getattr(watched, "confidence_score", 0) or 0)
+            previous_survival = int(getattr(watched, "survival_score", 0) or 0)
             drawdown = ((watched.peak_price_usd - c.price_usd) / max(watched.peak_price_usd, 1e-12)) * 100
             liq_drop = ((watched.first_liquidity_usd - c.liquidity_usd) / max(watched.first_liquidity_usd, 1.0)) * 100
 
@@ -93,6 +104,10 @@ class WatchList:
                 strength_reasons.append(f"Likidite büyüyor (+{liq_change:.1f}%)")
             if c.price_change_h1 >= 15 and c.price_change_h1 > watched.first_h1:
                 strength_reasons.append(f"H1 momentum güçlendi ({c.price_change_h1:+.1f}%)")
+            if current_op.edge_score >= previous_edge + 10 and current_op.confidence_score >= max(50, previous_conf):
+                strength_reasons.append(f"Edge güçlendi ({previous_edge} → {current_op.edge_score})")
+            if current_op.survival_score >= previous_survival + 8:
+                strength_reasons.append(f"Survival güçlendi ({previous_survival} → {current_op.survival_score})")
 
             # Send strength at most every 15 min per token and only with at least 2 confirmations.
             if (
@@ -126,6 +141,12 @@ class WatchList:
                 break_reasons.append(f"H1 momentum negatife döndü ({c.price_change_h1:.1f}%)")
             if vl < max(0.05, watched.first_volume_liq_ratio * 0.45):
                 break_reasons.append(f"Hacim/Likidite ivmesi söndü ({vl:.2f}x)")
+            if previous_edge and current_op.edge_score <= previous_edge - 18:
+                break_reasons.append(f"Edge skoru düştü ({previous_edge} → {current_op.edge_score})")
+            if previous_conf and current_op.confidence_score <= previous_conf - 15:
+                break_reasons.append(f"Confidence düştü ({previous_conf} → {current_op.confidence_score})")
+            if current_op.decision == "UZAK DUR":
+                break_reasons.append("Karar UZAK DUR seviyesine indi")
 
             # Send breakdown every 10 min max, not only once. Memecoin decay can happen fast.
             if break_reasons and (now - watched.last_break_alert_at) >= 10 * 60:
@@ -148,6 +169,17 @@ class WatchList:
             watched.last_buy_ratio = br
             watched.last_volume_liq_ratio = vl
             watched.last_h1 = c.price_change_h1
+            watched.opportunity_score = current_op.opportunity_score
+            watched.risk_score = current_op.risk_score
+            watched.exit_score = current_op.exit_score
+            watched.survival_score = current_op.survival_score
+            watched.expansion_score = current_op.expansion_score
+            watched.timing_score = current_op.timing_score
+            watched.confidence_score = current_op.confidence_score
+            watched.edge_score = current_op.edge_score
+            watched.radar_score = current_op.radar_score
+            watched.decision = current_op.decision
+            watched.mode = current_op.mode
             watched.last_checked_at = now
 
         self.store.save()

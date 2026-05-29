@@ -40,6 +40,13 @@ class WatchedToken:
     opportunity_score: int = 0
     risk_score: int = 0
     exit_score: int = 0
+    survival_score: int = 0
+    expansion_score: int = 0
+    timing_score: int = 0
+    confidence_score: int = 0
+    edge_score: int = 0
+    radar_score: int = 0
+    decision: str = "İZLE"
     last_strength_alert_at: float = 0.0
     last_break_alert_at: float = 0.0
 
@@ -53,13 +60,35 @@ class AlertEvent:
     opportunity_score: int
     risk_score: int
     exit_score: int = 0
+    survival_score: int = 0
+    expansion_score: int = 0
+    timing_score: int = 0
+    confidence_score: int = 0
+    edge_score: int = 0
+    radar_score: int = 0
+    decision: str = "İZLE"
     mode: str = "UNKNOWN"
+
+
+@dataclass
+class PositionRecord:
+    token_mint: str
+    symbol: str = "?"
+    opened_at: float = 0.0
+    entry_sol: float = 0.0
+    entry_token_raw: int = 0
+    buy_sig: str = ""
+    closed_at: float = 0.0
+    exit_sol: float = 0.0
+    sell_sig: str = ""
+    status: str = "open"  # open/closed/manual
 
 
 @dataclass
 class Store:
     watched: list[WatchedToken] = field(default_factory=list)
     alerts: list[AlertEvent] = field(default_factory=list)
+    positions: list[PositionRecord] = field(default_factory=list)
 
     @classmethod
     def load(cls) -> "Store":
@@ -78,7 +107,12 @@ class Store:
                 allowed = AlertEvent.__dataclass_fields__
                 clean = {k: v for k, v in x.items() if k in allowed}
                 alerts.append(AlertEvent(**clean))
-            return cls(watched=watched, alerts=alerts)
+            positions = []
+            for x in raw.get("positions", []):
+                allowed = PositionRecord.__dataclass_fields__
+                clean = {k: v for k, v in x.items() if k in allowed}
+                positions.append(PositionRecord(**clean))
+            return cls(watched=watched, alerts=alerts, positions=positions)
         except Exception as e:
             log.error("storage load error: %s", e)
             return cls()
@@ -90,6 +124,36 @@ class Store:
         self.alerts.append(event)
         self.alerts = self.alerts[-500:]
         self.save()
+
+    def record_buy(self, token_mint: str, symbol: str, entry_sol: float, entry_token_raw: int, buy_sig: str = "") -> None:
+        """Record a bot-executed buy so close reports can compute PnL."""
+        self.positions.append(PositionRecord(
+            token_mint=token_mint,
+            symbol=symbol or "?",
+            opened_at=time.time(),
+            entry_sol=float(entry_sol or 0.0),
+            entry_token_raw=int(entry_token_raw or 0),
+            buy_sig=buy_sig or "",
+            status="open",
+        ))
+        self.positions = self.positions[-500:]
+        self.save()
+
+    def latest_open_position(self, token_mint: str) -> PositionRecord | None:
+        for p in reversed(self.positions):
+            if p.token_mint == token_mint and p.status == "open":
+                return p
+        return None
+
+    def record_close(self, token_mint: str, exit_sol: float, sell_sig: str = "") -> PositionRecord | None:
+        p = self.latest_open_position(token_mint)
+        if p:
+            p.closed_at = time.time()
+            p.exit_sol = float(exit_sol or 0.0)
+            p.sell_sig = sell_sig or ""
+            p.status = "closed"
+            self.save()
+        return p
 
     def upsert_watch(self, token: WatchedToken) -> None:
         for i, old in enumerate(self.watched):
@@ -141,7 +205,8 @@ class Store:
             icon = "🟢" if w.mode == "CONFIRMED SIGNAL" else "🟡"
             lines.append(
                 f"{icon} ${w.symbol} "
-                f"O:<code>{w.opportunity_score}</code> R:<code>{w.risk_score}</code> X:<code>{w.exit_score}</code> "
+                f"Edge:<code>{getattr(w, 'edge_score', 0)}</code> Conf:<code>{getattr(w, 'confidence_score', 0)}</code> "
+                f"S:<code>{getattr(w, 'survival_score', 0)}</code> X:<code>{w.exit_score}</code> "
                 f"DD:<code>{dd:.1f}%</code>"
             )
         return "\n".join(lines)
