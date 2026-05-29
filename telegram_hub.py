@@ -313,7 +313,8 @@ class TelegramHub:
             if query.message:
                 await query.message.reply_text(
                     (
-                        f"⚠️ <code>{_esc(token)}</code> için cüzdandaki tüm bakiye satılacak.\n\n"
+                        f"⚠️ <code>{_esc(token)}</code> için bot cüzdanındaki tüm bakiye satılacak.\n\n"
+                        "Onaydan sonra satış ön kontrolü yapılır: token bakiyesi, SOL fee bakiyesi, Jupiter route, beklenen SOL çıkışı ve price impact raporlanır.\n\n"
                         "Onaylıyor musun?"
                     ),
                     parse_mode=ParseMode.HTML,

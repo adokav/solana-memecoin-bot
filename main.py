@@ -182,7 +182,21 @@ class Bot:
     async def quick_close(self, token_mint: str) -> tuple[bool, str]:
         if not self.keypair:
             return False, "Hızlı kapatma pasif: WALLET_PRIVATE_KEY tanımlı değil."
+
+        pre = None
         try:
+            pre = await self.jup.sell_preflight(token_mint)
+            if not pre.ok:
+                return False, (
+                    "Satış yapılamadı.\n"
+                    f"Sebep: <code>{html.escape(pre.reason)}</code>\n"
+                    f"Token bakiyesi raw: <code>{pre.token_amount_raw}</code>\n"
+                    f"Beklenen çıkış: <code>{pre.expected_out_sol:.6f} SOL</code>\n"
+                    f"Price impact: <code>{pre.price_impact_pct:.2f}%</code>\n"
+                    f"Cüzdan SOL: <code>{pre.sol_balance:.6f}</code>\n\n"
+                    "Kontrol et: alım bot cüzdanıyla mı yapıldı, cüzdanda fee için SOL var mı, Jupiter route var mı?"
+                )
+
             sig, sold_raw, out_lamports = await self.jup.sell_all(token_mint)
             sol = out_lamports / LAMPORTS_PER_SOL
             pos = self.store.record_close(token_mint, sol, sig)
@@ -199,16 +213,29 @@ class Bot:
             return True, (
                 "Pozisyon kapatma emri gönderildi.\n"
                 f"Satılan token raw: <code>{sold_raw}</code>\n"
-                f"Çıkan SOL: <code>{sol:.5f}</code>\n"
+                f"Preflight beklenen: <code>{pre.expected_out_sol:.5f} SOL</code> | Impact: <code>{pre.price_impact_pct:.2f}%</code>\n"
+                f"Gerçekleşen SOL: <code>{sol:.5f}</code>\n"
                 f"{pnl_line}\n"
                 f"Güncel SOL bakiye: <code>{bal_lamports / LAMPORTS_PER_SOL:.5f}</code>\n"
                 f"https://solscan.io/tx/{sig}"
             )
         except JupiterError as e:
-            return False, f"Satış başarısız: <code>{e}</code>"
+            # Try to surface actionable diagnostics instead of a generic "Satış hatası".
+            detail = ""
+            try:
+                pre = pre or await self.jup.sell_preflight(token_mint)
+                detail = (
+                    f"\nToken bakiyesi raw: <code>{pre.token_amount_raw}</code>"
+                    f"\nBeklenen çıkış: <code>{pre.expected_out_sol:.6f} SOL</code>"
+                    f"\nPrice impact: <code>{pre.price_impact_pct:.2f}%</code>"
+                    f"\nCüzdan SOL: <code>{pre.sol_balance:.6f}</code>"
+                )
+            except Exception:
+                detail = ""
+            return False, f"Satış başarısız: <code>{html.escape(str(e))}</code>{detail}"
         except Exception as e:
             log.exception("quick close error")
-            return False, f"Satış hatası: <code>{e}</code>"
+            return False, f"Satış hatası: <code>{html.escape(str(e))}</code>"
 
 
     def _opportunity_note(self, op) -> str:

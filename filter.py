@@ -56,10 +56,11 @@ def passes(c: Candidate) -> tuple[bool, str]:
     vlr = volume_liquidity_ratio(c)
     if vlr < config.early_min_volume_liq_ratio:
         return False, f"low early volume/liquidity: {vlr:.2f}"
-    # Eskiden 8x üstü hard reject idi; bu bazı erken hot coinleri kaçırıyordu.
-    # Artık sadece aşırı anormal/noisy durumları eliyoruz; geri kalanı risk skoruna bırakıyoruz.
-    if vlr > config.max_volume_liq_ratio:
-        return False, f"extreme volume/liquidity: {vlr:.1f}"
+    # Extreme volume/liquidity memecoinlerde bazen gerçek momentum, bazen wash/crowded trade demektir.
+    # Bu artık hard reject değil; opportunity.score() içinde risk/exit/confidence cezasına dönüşür.
+    # Sadece matematiksel olarak anlamsız uç değerleri veri hatası kabul ediyoruz.
+    if vlr > 250:
+        return False, f"invalid/noisy volume-liquidity: {vlr:.1f}"
 
     # Aşırı çöküş hard reject; aşırı pump ise skor katmanında risk olarak ele alınır.
     if c.price_change_h1 < config.min_price_h1:

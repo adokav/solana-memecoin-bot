@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import logging
+from dataclasses import dataclass
 
 import httpx
 from solana.rpc.async_api import AsyncClient
@@ -22,6 +23,26 @@ log = logging.getLogger(__name__)
 JUP_QUOTE = "https://quote-api.jup.ag/v6/quote"
 JUP_SWAP = "https://quote-api.jup.ag/v6/swap"
 LAMPORTS_PER_SOL = 1_000_000_000
+
+
+@dataclass
+class SellPreflight:
+    ok: bool
+    token_mint: str
+    token_amount_raw: int = 0
+    expected_out_lamports: int = 0
+    price_impact_pct: float = 0.0
+    sol_balance_lamports: int = 0
+    reason: str = ""
+    route_found: bool = False
+
+    @property
+    def expected_out_sol(self) -> float:
+        return self.expected_out_lamports / LAMPORTS_PER_SOL
+
+    @property
+    def sol_balance(self) -> float:
+        return self.sol_balance_lamports / LAMPORTS_PER_SOL
 
 
 class JupiterError(Exception):
@@ -166,9 +187,78 @@ class Jupiter:
         resp = await self.rpc.get_balance(self.kp.pubkey())
         return int(resp.value or 0)
 
-    async def sell_all(self, token_mint: str) -> tuple[str, int, int]:
-        amount = await self.token_balance_raw(token_mint)
+    async def sell_preflight(self, token_mint: str) -> SellPreflight:
+        """Check why a sell can/cannot be executed before building a transaction."""
+        if self.kp is None:
+            return SellPreflight(False, token_mint, reason="WALLET_PRIVATE_KEY yok; bot cüzdanı yüklenemedi")
+
+        try:
+            sol_bal = await self.sol_balance()
+        except Exception as e:
+            return SellPreflight(False, token_mint, reason=f"SOL bakiyesi okunamadı: {e}")
+
+        try:
+            amount = await self.token_balance_raw(token_mint)
+        except Exception as e:
+            return SellPreflight(False, token_mint, sol_balance_lamports=sol_bal, reason=f"Token bakiyesi okunamadı: {e}")
+
         if amount <= 0:
-            raise JupiterError("wallet has zero token balance")
-        sig, out_lamports = await self.sell(token_mint, amount)
-        return sig, amount, out_lamports
+            return SellPreflight(
+                False,
+                token_mint,
+                token_amount_raw=0,
+                sol_balance_lamports=sol_bal,
+                reason="Bot cüzdanında bu token bakiyesi 0. Manuel alım farklı cüzdandan yapıldıysa bot satamaz.",
+            )
+
+        if sol_bal < 5_000:
+            return SellPreflight(
+                False,
+                token_mint,
+                token_amount_raw=amount,
+                sol_balance_lamports=sol_bal,
+                reason="Cüzdanda işlem ücreti için yeterli SOL yok",
+            )
+
+        q = await self.quote(token_mint, config.sol_mint, amount, config.sell_slippage_bps)
+        if not q:
+            return SellPreflight(
+                False,
+                token_mint,
+                token_amount_raw=amount,
+                sol_balance_lamports=sol_bal,
+                reason="Jupiter token→SOL satış rotası bulamadı. Likidite yok, route yok veya token satılamıyor olabilir.",
+            )
+
+        out_lamports = int(q.get("outAmount") or 0)
+        impact = float(q.get("priceImpactPct") or 0) * 100
+        if out_lamports <= 0:
+            return SellPreflight(
+                False,
+                token_mint,
+                token_amount_raw=amount,
+                expected_out_lamports=0,
+                price_impact_pct=impact,
+                sol_balance_lamports=sol_bal,
+                route_found=True,
+                reason="Jupiter route var ama beklenen SOL çıkışı 0",
+            )
+
+        return SellPreflight(
+            True,
+            token_mint,
+            token_amount_raw=amount,
+            expected_out_lamports=out_lamports,
+            price_impact_pct=impact,
+            sol_balance_lamports=sol_bal,
+            route_found=True,
+            reason="sell route ok",
+        )
+
+    async def sell_all(self, token_mint: str) -> tuple[str, int, int]:
+        pre = await self.sell_preflight(token_mint)
+        if not pre.ok:
+            raise JupiterError(pre.reason)
+        # Reuse the preflight amount; sell() will quote again to avoid stale routes.
+        sig, out_lamports = await self.sell(token_mint, pre.token_amount_raw)
+        return sig, pre.token_amount_raw, out_lamports
